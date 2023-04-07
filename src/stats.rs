@@ -20,7 +20,6 @@ pub struct IterationStats {
 
 #[derive(Debug, Clone, Copy)]
 pub struct OptimumlessIterationStats {
-    selection_intensity: N64,
     avg_fitness: N64,
     rr: f64,
     theta: f64,
@@ -87,8 +86,14 @@ impl StateEncoderWithOptimum<'_> {
             .sum::<N64>()
             / population_size;
 
+        let selection_intensity = if (std_dev == N64::from(0.0)) {
+            1.0.into()
+        } else {
+            (avg_fitness - pre_selection_fitness) / std_dev
+        };
+
         self.iterations.push(IterationStats {
-            selection_intensity: (avg_fitness - pre_selection_fitness) / std_dev,
+            selection_intensity,
             selection_diff: avg_fitness - pre_selection_fitness,
             growth_rate: optimal_specimen_count as f64
                 / self.prev_iteration_optimal_specimens as f64,
@@ -161,14 +166,8 @@ impl OptimumlessStateEncoder {
     ) -> N64 {
         let population_size = population.len() as f64;
         let avg_fitness = avg_fitness(population);
-        let std_dev = population
-            .iter()
-            .map(|g| N64::powi(g.fitness - avg_fitness, 2))
-            .sum::<N64>()
-            / population_size;
 
         self.iterations.push(OptimumlessIterationStats {
-            selection_intensity: (avg_fitness - pre_selection_fitness) / std_dev,
             selection_diff: avg_fitness - pre_selection_fitness,
             avg_fitness,
             rr: unique_specimens_selected as f64 / population_size,

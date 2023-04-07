@@ -1,7 +1,7 @@
 #![feature(iter_array_chunks)]
-use std::{fmt::Write, path::PathBuf};
+use std::{fmt::Write, path::PathBuf, sync::atomic::AtomicUsize};
 
-use bitvec::order::Lsb0;
+use bitvec::{order::Lsb0, BitArr};
 use bitvec::vec::BitVec;
 use decorum::{Finite, NotNan, N64, R64};
 use num_traits::{real::Real, FromPrimitive};
@@ -223,10 +223,10 @@ fn simulation(mut state: RunState) -> (RunKey, RunStats) {
             new_population: population,
             unique_specimens_selected,
         } = selection(&mut state, starting_population);
-        avg_fitness = state.record_run_stat(avg_fitness, &population, unique_specimens_selected);
         if is_convergant(&state, &population) {
             return state.finish_converged(&population);
         }
+        avg_fitness = state.record_run_stat(avg_fitness, &population, unique_specimens_selected);
         let population = crossover(&mut state, population);
         let population = mutation(&mut state, population);
         let population = evaluate(&mut state, population);
@@ -320,13 +320,32 @@ fn config_permutations() -> Vec<AlgoConfig> {
 
 fn main() {
     let configs = config_permutations();
+    let len = configs.len() * 100;
     println!("Running {} configs", configs.len());
+    let counter = AtomicUsize::new(0);
 
-    for config in configs {
-        println!("Running config: {:#?}", config);
-        for run_idx in 0..MAX_RUNS {
-            let state = RunState::new(&config, run_idx);
-            let (_key, _stats) = simulation(state);
+    rayon::scope(|s| {
+        for (i, config) in configs.into_iter().enumerate() {
+            let counter = &counter;
+            s.spawn(move |_| {
+                // println!("Running config: {:#?}", config);
+                let solved = counter.load(std::sync::atomic::Ordering::SeqCst);
+                println!(
+                    "Solved {}/{} ({}%)\tConfiguration #{i}: {}/crossover={}/mutation={}/{}",
+                    solved + 1,
+                    len,
+                    (solved + 1) * 100 / len,
+                    config.ty,
+                    config.apply_crossover,
+                    config.mutation_rate.is_some(),
+                    config.selection,
+                );
+                for run_idx in 0..MAX_RUNS {
+                    let state = RunState::new(&config, run_idx);
+                    let (_key, _stats) = simulation(state);
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
         }
-    }
+    });
 }
