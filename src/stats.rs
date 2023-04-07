@@ -52,7 +52,7 @@ pub enum OptimumDisabiguity<With, Without> {
 pub type RunStats = OptimumDisabiguity<RunStatsWithOptimum, OptimumlessRunStats>;
 
 pub type StatEncoder<'a> =
-    OptimumDisabiguity<StateEncoderWithOptimum<'a>, OptimumlessStateEncoder<'a>>;
+    OptimumDisabiguity<StateEncoderWithOptimum<'a>, OptimumlessStateEncoder>;
 
 pub struct StateEncoderWithOptimum<'a> {
     config: &'a AlgoConfig,
@@ -148,12 +148,11 @@ impl StateEncoderWithOptimum<'_> {
     }
 }
 
-pub struct OptimumlessStateEncoder<'a> {
-    config: &'a AlgoConfig,
+pub struct OptimumlessStateEncoder {
     iterations: Vec<OptimumlessIterationStats>,
 }
 
-impl OptimumlessStateEncoder<'_> {
+impl OptimumlessStateEncoder {
     pub fn record_run_stat(
         &mut self,
         pre_selection_fitness: N64,
@@ -210,7 +209,6 @@ impl<'a> StatEncoder<'a> {
                 prev_iteration_optimal_specimens: 0,
             }),
             None => Self::Optimumless(OptimumlessStateEncoder {
-                config,
                 iterations: Vec::new(),
             }),
         }

@@ -1,24 +1,34 @@
 use core::fmt;
 
-use bitvec::bitvec;
 use decorum::N64;
 
-use crate::{evaluation::pow1::fitness, EvaluatedGenome, Genome, RunState};
+use crate::{EvaluatedGenome, Genome, RunState};
 
 pub fn evaluate(state: &mut RunState, population: Vec<Genome>) -> Vec<EvaluatedGenome> {
+    fn res(
+        population: Vec<Genome>,
+        fitness_fn: impl Fn(&Genome) -> N64,
+    ) -> Vec<EvaluatedGenome> {
+        population
+            .into_iter()
+            .map(|genome| EvaluatedGenome {
+                fitness: fitness_fn(&genome),
+                genome,
+            })
+            .collect()
+    }
+
     match state.config.ty {
         AlgoType::HasPhoenotype(algo, encoding) => {
             let (decode_genome, decode_phenotype, fitness) = phenotype_fns(algo, encoding);
-
-            population
-                .into_iter()
-                .map(|genome| EvaluatedGenome {
-                    fitness: fitness(decode_phenotype(&decode_genome(&genome))),
-                    genome,
-                })
-                .collect()
+            res(population, |genome| {
+                fitness(decode_phenotype(&decode_genome(genome)))
+            })
         }
-        _ => todo!(),
+        AlgoType::BinaryOnly(BinaryAlgo::FConst) => res(population, |_| 100.0.into()),
+        AlgoType::BinaryOnly(BinaryAlgo::FHD { sigma }) => {
+            res(population, |genome| fhd::fitness(sigma, genome))
+        }
     }
 }
 
@@ -92,7 +102,7 @@ pub fn evaluate_phenotype(
 pub fn optimal_binary_specimen(algo: BinaryAlgo) -> Option<Genome> {
     match algo {
         BinaryAlgo::FConst => None,
-        BinaryAlgo::FHD => todo!(),
+        BinaryAlgo::FHD { .. } => Some(fhd::optimal_specimen()),
     }
 }
 
@@ -121,14 +131,14 @@ impl fmt::Display for GenomeEncoding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinaryAlgo {
     FConst,
-    FHD,
+    FHD { sigma: N64 },
 }
 
 impl fmt::Display for BinaryAlgo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BinaryAlgo::FConst => write!(f, "FConst"),
-            BinaryAlgo::FHD => write!(f, "FHD"),
+            BinaryAlgo::FHD { sigma } => write!(f, "FHD-sigma={sigma}"),
         }
     }
 }
@@ -158,8 +168,27 @@ impl fmt::Display for AlgoType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AlgoType::BinaryOnly(algo) => algo.fmt(f),
-            AlgoType::HasPhoenotype(algo, encoding) => write!(f, "{algo}-{encoding}")
+            AlgoType::HasPhoenotype(algo, encoding) => write!(f, "{algo}-{encoding}"),
         }
+    }
+}
+
+pub mod fhd {
+    use super::Genome;
+    use bitvec::{bitvec, order::Lsb0};
+    use decorum::N64;
+    use num::FromPrimitive;
+
+    pub const GENE_LENGTH: usize = 100;
+
+    pub fn optimal_specimen() -> Genome {
+        bitvec![u8, Lsb0; 0; 100]
+    }
+
+    pub fn fitness(sigma: N64, genome: &Genome) -> N64 {
+        let zeros = N64::from_usize(genome.count_zeros()).unwrap();
+        let len = N64::from_usize(genome.len()).unwrap();
+        len - zeros + zeros * sigma
     }
 }
 

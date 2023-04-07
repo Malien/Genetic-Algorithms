@@ -298,7 +298,7 @@ fn config_permutations() -> Vec<AlgoConfig> {
         apply_mutation in [true, false];
         selection_prob in [1.0, 0.8, 0.7, 0.6];
         replacement in [TournamentReplacement::With, TournamentReplacement::Without];
-        algo in [BinaryAlgo::FConst, BinaryAlgo::FHD];
+        algo in [BinaryAlgo::FConst, BinaryAlgo::FHD { sigma: 100.0.into() }];
         {
             res.push(AlgoConfig {
                 ty: AlgoType::BinaryOnly(algo),
