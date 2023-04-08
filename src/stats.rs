@@ -55,7 +55,7 @@ pub type StatEncoder<'a> =
 
 pub struct StateEncoderWithOptimum<'a> {
     config: &'a AlgoConfig,
-    optimal_specimen: &'a Genome,
+    optimal_specimen: Genome,
     iterations: Vec<IterationStats>,
     prev_iteration_optimal_specimens: usize,
 }
@@ -86,7 +86,7 @@ impl StateEncoderWithOptimum<'_> {
             .sum::<N64>()
             / population_size;
 
-        let selection_intensity = if (std_dev == N64::from(0.0)) {
+        let selection_intensity = if std_dev == N64::from(0.0) {
             1.0.into()
         } else {
             (avg_fitness - pre_selection_fitness) / std_dev
@@ -110,18 +110,18 @@ impl StateEncoderWithOptimum<'_> {
         let success = match (self.config.mutation_rate, self.config.ty) {
             (None, AlgoType::BinaryOnly(_)) => final_population
                 .iter()
-                .all(|genome| &genome.genome == self.optimal_specimen),
+                .all(|genome| genome.genome == self.optimal_specimen),
             (Some(_), AlgoType::BinaryOnly(_)) => {
                 let optimal_specimen_count = final_population
                     .iter()
-                    .filter(|genome| &genome.genome == self.optimal_specimen)
+                    .filter(|genome| genome.genome == self.optimal_specimen)
                     .count();
                 optimal_specimen_count > (final_population.len() * 9 / 10)
             }
             (_, AlgoType::HasPhoenotype(algo_type, encoding)) => {
-                let optimal = evaluate_phenotype(algo_type, encoding, &self.optimal_specimen);
+                let optimal = evaluate_phenotype(algo_type, encoding, self.optimal_specimen);
                 final_population.iter().any(|genome| {
-                    let current = evaluate_phenotype(algo_type, encoding, &genome.genome);
+                    let current = evaluate_phenotype(algo_type, encoding, genome.genome);
                     N64::abs(current.pheonotype - optimal.pheonotype) <= N64::from(0.01)
                         && N64::abs(current.fitness - optimal.fitness) <= N64::from(0.01)
                 })
@@ -135,7 +135,7 @@ impl StateEncoderWithOptimum<'_> {
             && matches!(self.config.ty, AlgoType::BinaryOnly(_))
             && final_population
                 .iter()
-                .all(|genome| &genome.genome == self.optimal_specimen);
+                .all(|genome| genome.genome == self.optimal_specimen);
         self.finish(final_population, success)
     }
 
@@ -201,7 +201,7 @@ impl OptimumlessStateEncoder {
 impl<'a> StatEncoder<'a> {
     pub fn new(config: &'a AlgoConfig) -> Self {
         match config.optimal_specimen {
-            Some(ref optimal_specimen) => Self::WithOptimum(StateEncoderWithOptimum {
+            Some(optimal_specimen) => Self::WithOptimum(StateEncoderWithOptimum {
                 config,
                 optimal_specimen,
                 iterations: Vec::new(),
