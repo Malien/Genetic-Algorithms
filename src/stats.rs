@@ -2,9 +2,8 @@ use decorum::N64;
 use num_traits::real::Real;
 
 use crate::{
-    avg_fitness,
-    evaluation::{evaluate_phenotype, AlgoType},
-    AlgoConfig, EvaluatedGenome, Genome,
+    avg_fitness, evaluation::evaluate_phenotype, AlgoConfig, EvaluatedGenome, GenFamily, Genome,
+    G10, G100,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -50,21 +49,27 @@ pub enum OptimumDisabiguity<With, Without> {
 
 pub type RunStats = OptimumDisabiguity<RunStatsWithOptimum, OptimumlessRunStats>;
 
-pub type StatEncoder<'a> =
-    OptimumDisabiguity<StateEncoderWithOptimum<'a>, OptimumlessStateEncoder>;
+pub type StatEncoder<'a, F> =
+    OptimumDisabiguity<StateEncoderWithOptimum<'a, F>, OptimumlessStateEncoder>;
 
-pub struct StateEncoderWithOptimum<'a> {
-    config: &'a AlgoConfig,
-    optimal_specimen: Genome,
+pub struct StateEncoderWithOptimum<'a, F: GenFamily + ?Sized>
+where
+    [(); bitvec::mem::elts::<u16>(F::N)]:,
+{
+    config: &'a AlgoConfig<F>,
+    optimal_specimen: Genome<{ F::N }>,
     iterations: Vec<IterationStats>,
     prev_iteration_optimal_specimens: usize,
 }
 
-impl StateEncoderWithOptimum<'_> {
+impl<F: SuccessFamily> StateEncoderWithOptimum<'_, F>
+where
+    [(); bitvec::mem::elts::<u16>(F::N)]:,
+{
     pub fn record_run_stat(
         &mut self,
         pre_selection_fitness: N64,
-        population: &[EvaluatedGenome],
+        population: &[EvaluatedGenome<{ F::N }>],
         unique_specimens_selected: usize,
     ) -> N64 {
         let optimal_specimen_count = self
@@ -106,40 +111,29 @@ impl StateEncoderWithOptimum<'_> {
         return avg_fitness;
     }
 
-    pub fn finish_converged(self, final_population: &[EvaluatedGenome]) -> RunStatsWithOptimum {
-        let success = match (self.config.mutation_rate, self.config.ty) {
-            (None, AlgoType::BinaryOnly(_)) => final_population
-                .iter()
-                .all(|genome| genome.genome == self.optimal_specimen),
-            (Some(_), AlgoType::BinaryOnly(_)) => {
-                let optimal_specimen_count = final_population
-                    .iter()
-                    .filter(|genome| genome.genome == self.optimal_specimen)
-                    .count();
-                optimal_specimen_count > (final_population.len() * 9 / 10)
-            }
-            (_, AlgoType::HasPhoenotype(algo_type, encoding)) => {
-                let optimal = evaluate_phenotype(algo_type, encoding, self.optimal_specimen);
-                final_population.iter().any(|genome| {
-                    let current = evaluate_phenotype(algo_type, encoding, genome.genome);
-                    N64::abs(current.pheonotype - optimal.pheonotype) <= N64::from(0.01)
-                        && N64::abs(current.fitness - optimal.fitness) <= N64::from(0.01)
-                })
-            }
-        };
+    pub fn finish_converged(
+        self,
+        final_population: &[EvaluatedGenome<{ F::N }>],
+    ) -> RunStatsWithOptimum {
+        let success =
+            F::is_success_converged(&self.config, final_population, self.optimal_specimen);
         self.finish(final_population, success)
     }
 
-    pub fn finish_unconverged(self, final_population: &[EvaluatedGenome]) -> RunStatsWithOptimum {
-        let success = self.config.mutation_rate.is_none()
-            && matches!(self.config.ty, AlgoType::BinaryOnly(_))
-            && final_population
-                .iter()
-                .all(|genome| genome.genome == self.optimal_specimen);
+    pub fn finish_unconverged(
+        self,
+        final_population: &[EvaluatedGenome<{ F::N }>],
+    ) -> RunStatsWithOptimum {
+        let success =
+            F::is_success_unconverged(self.config, final_population, self.optimal_specimen);
         self.finish(final_population, success)
     }
 
-    fn finish(self, final_population: &[EvaluatedGenome], success: bool) -> RunStatsWithOptimum {
+    fn finish(
+        self,
+        final_population: &[EvaluatedGenome<{ F::N }>],
+        success: bool,
+    ) -> RunStatsWithOptimum {
         RunStatsWithOptimum {
             iterations: self.iterations,
             best_fitness: final_population
@@ -153,17 +147,106 @@ impl StateEncoderWithOptimum<'_> {
     }
 }
 
+pub trait SuccessFamily: GenFamily {
+    fn is_success_converged(
+        config: &AlgoConfig<Self>,
+        final_population: &[EvaluatedGenome<{ Self::N }>],
+        optimal_specimen: Genome<{ Self::N }>,
+    ) -> bool
+    where
+        [(); bitvec::mem::elts::<u16>(Self::N)]:;
+
+    fn is_success_unconverged(
+        config: &AlgoConfig<Self>,
+        final_population: &[EvaluatedGenome<{ Self::N }>],
+        optimal_specimen: Genome<{ Self::N }>,
+    ) -> bool
+    where
+        [(); bitvec::mem::elts::<u16>(Self::N)]:;
+}
+
+impl SuccessFamily for G10 {
+    fn is_success_converged(
+        config: &AlgoConfig<Self>,
+        final_population: &[EvaluatedGenome<{ Self::N }>],
+        optimal_specimen: Genome<{ Self::N }>,
+    ) -> bool
+    where
+        [(); bitvec::mem::elts::<u16>(Self::N)]:,
+    {
+        let (algo_type, encoding) = config.ty;
+        let optimal = evaluate_phenotype(algo_type, encoding, optimal_specimen);
+        final_population.iter().any(|genome| {
+            let current = evaluate_phenotype(algo_type, encoding, genome.genome);
+            N64::abs(current.pheonotype - optimal.pheonotype) <= N64::from(0.01)
+                && N64::abs(current.fitness - optimal.fitness) <= N64::from(0.01)
+        })
+    }
+
+    fn is_success_unconverged(
+        _: &AlgoConfig<Self>,
+        _: &[EvaluatedGenome<{ Self::N }>],
+        _: Genome<{ Self::N }>,
+    ) -> bool
+    where
+        [(); bitvec::mem::elts::<u16>(Self::N)]:,
+    {
+        false
+    }
+}
+
+impl SuccessFamily for G100 {
+    fn is_success_converged(
+        config: &AlgoConfig<Self>,
+        final_population: &[EvaluatedGenome<{ Self::N }>],
+        optimal_specimen: Genome<{ Self::N }>,
+    ) -> bool
+    where
+        [(); bitvec::mem::elts::<u16>(Self::N)]:,
+    {
+        match config.mutation_rate {
+            None => final_population
+                .iter()
+                .all(|genome| genome.genome == optimal_specimen),
+            Some(_) => {
+                let optimal_specimen_count = final_population
+                    .iter()
+                    .filter(|genome| genome.genome == optimal_specimen)
+                    .count();
+                optimal_specimen_count > (final_population.len() * 9 / 10)
+            }
+        }
+    }
+
+    fn is_success_unconverged(
+        config: &AlgoConfig<Self>,
+        final_population: &[EvaluatedGenome<{ Self::N }>],
+        optimal_specimen: Genome<{ Self::N }>,
+    ) -> bool
+    where
+        [(); bitvec::mem::elts::<u16>(Self::N)]:,
+    {
+        config.mutation_rate.is_none()
+            && final_population
+                .iter()
+                .all(|genome| genome.genome == optimal_specimen)
+    }
+}
+
 pub struct OptimumlessStateEncoder {
     iterations: Vec<OptimumlessIterationStats>,
 }
 
 impl OptimumlessStateEncoder {
-    pub fn record_run_stat(
+    pub fn record_run_stat<const N: usize>(
         &mut self,
         pre_selection_fitness: N64,
-        population: &[EvaluatedGenome],
+        population: &[EvaluatedGenome<N>],
         unique_specimens_selected: usize,
-    ) -> N64 {
+    ) -> N64
+    where
+        [(); bitvec::mem::elts::<u16>(N)]:,
+    {
         let population_size = population.len() as f64;
         let avg_fitness = avg_fitness(population);
 
@@ -176,15 +259,34 @@ impl OptimumlessStateEncoder {
         return avg_fitness;
     }
 
-    pub fn finish_converged(self, final_population: &[EvaluatedGenome]) -> OptimumlessRunStats {
+    pub fn finish_converged<const N: usize>(
+        self,
+        final_population: &[EvaluatedGenome<N>],
+    ) -> OptimumlessRunStats
+    where
+        [(); bitvec::mem::elts::<u16>(N)]:,
+    {
         self.finish(final_population, true)
     }
 
-    pub fn finish_unconverged(self, final_population: &[EvaluatedGenome]) -> OptimumlessRunStats {
+    pub fn finish_unconverged<const N: usize>(
+        self,
+        final_population: &[EvaluatedGenome<N>],
+    ) -> OptimumlessRunStats
+    where
+        [(); bitvec::mem::elts::<u16>(N)]:,
+    {
         self.finish(final_population, false)
     }
 
-    fn finish(self, final_population: &[EvaluatedGenome], success: bool) -> OptimumlessRunStats {
+    fn finish<const N: usize>(
+        self,
+        final_population: &[EvaluatedGenome<N>],
+        success: bool,
+    ) -> OptimumlessRunStats
+    where
+        [(); bitvec::mem::elts::<u16>(N)]:,
+    {
         OptimumlessRunStats {
             iterations: self.iterations,
             best_fitness: final_population
@@ -198,8 +300,11 @@ impl OptimumlessStateEncoder {
     }
 }
 
-impl<'a> StatEncoder<'a> {
-    pub fn new(config: &'a AlgoConfig) -> Self {
+impl<'a, F: SuccessFamily> StatEncoder<'a, F>
+where
+    [(); bitvec::mem::elts::<u16>(F::N)]:,
+{
+    pub fn new(config: &'a AlgoConfig<F>) -> Self {
         match config.optimal_specimen {
             Some(optimal_specimen) => Self::WithOptimum(StateEncoderWithOptimum {
                 config,
@@ -216,7 +321,7 @@ impl<'a> StatEncoder<'a> {
     pub fn record_run_stat(
         &mut self,
         pre_selection_fitness: N64,
-        population: &[EvaluatedGenome],
+        population: &[EvaluatedGenome<{ F::N }>],
         unique_specimens_selected: usize,
     ) -> N64 {
         match self {
@@ -229,7 +334,7 @@ impl<'a> StatEncoder<'a> {
         }
     }
 
-    pub fn finish_converged(self, final_population: &[EvaluatedGenome]) -> RunStats {
+    pub fn finish_converged(self, final_population: &[EvaluatedGenome<{ F::N }>]) -> RunStats {
         use OptimumDisabiguity::*;
         match self {
             WithOptimum(stats) => WithOptimum(stats.finish_converged(final_population)),
@@ -237,7 +342,7 @@ impl<'a> StatEncoder<'a> {
         }
     }
 
-    pub fn finish_unconverged(self, final_population: &[EvaluatedGenome]) -> RunStats {
+    pub fn finish_unconverged(self, final_population: &[EvaluatedGenome<{ F::N }>]) -> RunStats {
         use OptimumDisabiguity::*;
         match self {
             WithOptimum(stats) => WithOptimum(stats.finish_unconverged(final_population)),

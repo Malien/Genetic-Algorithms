@@ -4,7 +4,7 @@ use std::fmt;
 use decorum::{Finite, R64};
 use rand::seq::{SliceRandom, index::sample};
 
-use crate::{RunState, EvaluatedGenome};
+use crate::{RunState, EvaluatedGenome, FullFamily};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Selection {
@@ -39,7 +39,9 @@ impl fmt::Display for TournamentReplacement {
     }
 }
 
-pub fn selection(state: &mut RunState, population: Vec<EvaluatedGenome>) -> SelectionResult {
+pub fn selection<F: FullFamily>(state: &mut RunState<F>, population: Vec<EvaluatedGenome<{F::N}>>) -> SelectionResult<{F::N}> 
+where [(); bitvec::mem::elts::<u16>(F::N)]:
+{
     let Selection::StochasticTournament { prob, replacement } = state.config.selection;
     match replacement {
         TournamentReplacement::With => {
@@ -51,16 +53,20 @@ pub fn selection(state: &mut RunState, population: Vec<EvaluatedGenome>) -> Sele
     }
 }
 
-pub struct SelectionResult {
-    pub new_population: Vec<EvaluatedGenome>,
+pub struct SelectionResult<const N: usize> 
+where [(); bitvec::mem::elts::<u16>(N)]:
+{
+    pub new_population: Vec<EvaluatedGenome<N>>,
     pub unique_specimens_selected: usize,
 }
 
-fn stochastic_tournament_selection_with_replacement(
-    initial_population: Vec<EvaluatedGenome>,
+fn stochastic_tournament_selection_with_replacement<const N: usize>(
+    initial_population: Vec<EvaluatedGenome<N>>,
     chance: R64,
     rng: &mut impl rand::Rng,
-) -> SelectionResult {
+) -> SelectionResult<N> 
+where [(); bitvec::mem::elts::<u16>(N)]:
+{
     let mut population = Vec::with_capacity(initial_population.len() * 2);
     population.extend(initial_population.iter().cloned().enumerate());
     population.extend(initial_population.into_iter().enumerate());
@@ -87,11 +93,13 @@ fn stochastic_tournament_selection_with_replacement(
     }
 }
 
-fn stochastic_tournament_selection_without_replacement(
-    initial_population: Vec<EvaluatedGenome>,
+fn stochastic_tournament_selection_without_replacement<const N: usize>(
+    initial_population: Vec<EvaluatedGenome<N>>,
     chance: R64,
     rng: &mut impl rand::Rng,
-) -> SelectionResult {
+) -> SelectionResult<N> 
+where [(); bitvec::mem::elts::<u16>(N)]:
+{
     let mut new_population = Vec::with_capacity(initial_population.len());
     let mut winner_indecies = HashSet::with_capacity(initial_population.len());
 
