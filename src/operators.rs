@@ -5,13 +5,13 @@ use crate::{EvaluatedGenome, Genome, RunState, FullFamily, GenFamily};
 pub fn crossover<F: GenFamily>(state: &mut RunState<F>, mut population: Vec<EvaluatedGenome<{F::N}>>) -> Vec<Genome<{F::N}>> 
 where [(); bitvec::mem::elts::<u16>(F::N)]:
 {
-    population.shuffle(&mut state.rng);
     if !state.config.apply_crossover {
         return population.into_iter().map(|genome| genome.genome).collect();
     }
     if population.len() % 2 != 0 {
         panic!("Population size must be even for crossover");
     }
+    population.shuffle(&mut state.rng);
     population
         .into_iter()
         .array_chunks::<2>()
@@ -37,8 +37,8 @@ where [(); bitvec::mem::elts::<u16>(N)]:
 fn test_gene_crossover() {
     use bitvec::{bitarr, order::Lsb0};
 
-    let parent1 = bitarr![u16, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
-    let parent2 = bitarr![u16, Lsb0; 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let parent1 = Genome::new(bitarr![u16, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+    let parent2 = Genome::new(bitarr![u16, Lsb0; 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let (child1, child2) = gene_crossover::<10>(parent1, parent2, 4);
     assert_eq!(&child1[..], &bitarr![u16, Lsb0; 1, 1, 1, 1, 0, 0, 0, 0, 0, 0]);
     assert_eq!(&child2[..], &bitarr![u16, Lsb0; 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]);
