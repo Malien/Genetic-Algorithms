@@ -8,6 +8,7 @@ edition = "2021"
 parallel = ["dep:rayon"]
 
 [dependencies]
+arrayvec = "0.7.2"
 bitvec = "1.0.1"
 csv = "1.2.1"
 decorum = "0.3.1"

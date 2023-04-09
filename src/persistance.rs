@@ -6,7 +6,11 @@ use std::{
 
 use crate::{
     selection::{Selection, TournamentReplacement},
-    stats::{ConfigStats, ConfigStatsWithOptimum, OptimumDisabiguity, RunStatsWithOptimum}, ToPath,
+    stats::{
+        ConfigStats, ConfigStatsWithOptimum, OptimumDisabiguity,
+        RunStatsWithOptimum, PopulationStats,
+    },
+    ToPath,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -176,6 +180,36 @@ fn write_run_with_optimum(path: &Path, run: RunStatsWithOptimum) -> io::Result<(
             iteration.rr.to_string(),
             iteration.theta.to_string(),
             iteration.selection_diff.to_string(),
+        ])?;
+
+    }
+
+    for (idx, population) in run.starting_population.into_iter().enumerate() {
+        write_iteration_population(&path.join(format!("{idx}")), population)?;
+    }
+
+    write_iteration_population(&path.join("final"), run.final_population)?;
+
+    Ok(())
+}
+
+fn write_iteration_population(path: &Path, population: impl IntoIterator<Item = PopulationStats>) -> io::Result<()> {
+    std::fs::create_dir_all(path)?;
+
+    let file = File::create(path.join("population.csv"))?;
+    let writer = BufWriter::new(file);
+    let mut writer = csv::Writer::from_writer(writer);
+
+    writer.write_record(&["fitness", "phenotype", "ones_count"])?;
+
+    for population in population {
+        writer.write_record(&[
+            population.fitness.to_string(),
+            population
+                .phenotype
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            population.ones_count.to_string(),
         ])?;
     }
 

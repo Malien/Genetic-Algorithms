@@ -103,6 +103,10 @@ where
             .record_run_stat(pre_selection_fitness, population, unique_specimens_selected)
     }
 
+    fn record_population(&mut self, population: &[EvaluatedGenome<{ F::N }>]) {
+        self.stats.record_population(population)
+    }
+
     fn finish_converged(self, final_population: &[EvaluatedGenome<{ F::N }>]) -> RunStats {
         self.stats.finish_converged(final_population)
     }
@@ -305,6 +309,7 @@ where
 {
     let starting_population = state.initial_population();
     let mut starting_population = evaluate(&mut state, starting_population);
+    state.record_population(&starting_population);
     let mut avg_fitness = avg_fitness(&starting_population);
     for _ in 0..MAX_GENERATIONS {
         let SelectionResult {
@@ -318,6 +323,7 @@ where
         let population = crossover(&mut state, population);
         let population = mutation(&mut state, population);
         let population = evaluate(&mut state, population);
+        state.record_population(&population);
         starting_population = population;
     }
     return state.finish_unconverged(&starting_population);

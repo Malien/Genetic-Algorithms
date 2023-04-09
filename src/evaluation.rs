@@ -34,6 +34,10 @@ pub trait EvaluateFamily: GenFamily {
     fn evalute(genome: Genome<{ Self::N }>, algo: Self::AlgoType) -> N64
     where
         [(); bitvec::mem::elts::<u16>(Self::N)]:;
+
+    fn decode_phenotype(genome: Genome<{ Self::N }>, algo: Self::AlgoType) -> Option<N64>
+    where
+        [(); bitvec::mem::elts::<u16>(Self::N)]:;
 }
 
 impl EvaluateFamily for G10 {
@@ -43,6 +47,14 @@ impl EvaluateFamily for G10 {
     {
         let (decode_genome, decode_phenotype, fitness) = phenotype_fns(algo, encoding);
         fitness(decode_phenotype(decode_genome(genome)))
+    }
+
+    fn decode_phenotype(genome: Genome<{ Self::N }>, (algo, encoding): Self::AlgoType) -> Option<N64>
+    where
+        [(); bitvec::mem::elts::<u16>(Self::N)]:,
+    {
+        let (decode_genome, decode_phenotype, _) = phenotype_fns(algo, encoding);
+        Some(decode_phenotype(decode_genome(genome)))
     }
 }
 
@@ -55,6 +67,13 @@ impl EvaluateFamily for G100 {
             BinaryAlgo::FConst => 100.0.into(),
             BinaryAlgo::FHD { sigma } => fhd::fitness(sigma, genome),
         }
+    }
+
+    fn decode_phenotype(_: Genome<{ Self::N }>, _: Self::AlgoType) -> Option<N64>
+    where
+        [(); bitvec::mem::elts::<u16>(Self::N)]:,
+    {
+        None
     }
 }
 
@@ -242,9 +261,15 @@ pub mod pow1 {
         let genome = encode_binary(0.0);
         assert_eq!(genome, Genome::new(bitarr![u16, Lsb0; 0; 10]));
         let genome = encode_binary(0.03);
-        assert_eq!(genome, Genome::new(bitarr![u16, Lsb0; 1, 1, 0, 0, 0, 0, 0, 0, 0, 0]));
+        assert_eq!(
+            genome,
+            Genome::new(bitarr![u16, Lsb0; 1, 1, 0, 0, 0, 0, 0, 0, 0, 0])
+        );
         let genome = encode_binary(10.23);
-        assert_eq!(genome, Genome::new(bitarr![u16, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]));
+        assert_eq!(
+            genome,
+            Genome::new(bitarr![u16, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])
+        );
     }
 
     #[test]
