@@ -1,6 +1,11 @@
 #![feature(iter_array_chunks)]
 #![feature(generic_const_exprs)]
-use std::{fmt::Write, ops::{Deref, DerefMut}, path::PathBuf, sync::atomic::AtomicUsize};
+use std::{
+    fmt::Write,
+    ops::{Deref, DerefMut},
+    path::PathBuf,
+    sync::atomic::AtomicUsize,
+};
 
 use bitvec::{order::Lsb0, slice::BitSlice, BitArr};
 use decorum::{Finite, N64, R64};
@@ -19,6 +24,8 @@ use evaluation::{
 };
 use selection::{selection, Selection, SelectionResult, TournamentReplacement};
 use stats::{RunStats, StatEncoder, SuccessFamily};
+
+use crate::stats::{ConfigStatsWithOptimum, ConfigStats};
 
 const MAX_GENERATIONS: usize = 10_000_000;
 const MAX_RUNS: usize = 100;
@@ -199,7 +206,8 @@ where
     [(); bitvec::mem::elts::<u16>(N)]:,
 {
     type Item = bool;
-    type IntoIter = std::iter::Take<bitvec::array::IntoIter<[u16; bitvec::mem::elts::<u16>(N)], Lsb0>>;
+    type IntoIter =
+        std::iter::Take<bitvec::array::IntoIter<[u16; bitvec::mem::elts::<u16>(N)], Lsb0>>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.arr.into_iter().take(N)
@@ -296,7 +304,10 @@ fn same_genomes_are_homougeneous() {
         bitarr![u16, Lsb0; 0, 1, 0, 1, 0, 1, 0, 1],
         bitarr![u16, Lsb0; 0, 1, 0, 1, 0, 1, 0, 1],
     ];
-    assert_eq!(homougeneousness::<10>(population.into_iter().map(Genome::new)), 1.0);
+    assert_eq!(
+        homougeneousness::<10>(population.into_iter().map(Genome::new)),
+        1.0
+    );
 }
 
 #[test]
@@ -315,7 +326,10 @@ fn almost_identical_gemoes_are_somewhat_homougeneous() {
         bitarr![u16, Lsb0; 0, 1, 0, 1, 0, 0, 0, 1],
         bitarr![u16, Lsb0; 0, 1, 0, 1, 0, 1, 0, 0],
     ];
-    assert_eq!(homougeneousness::<10>(population.into_iter().map(Genome::new)), 0.8);
+    assert_eq!(
+        homougeneousness::<10>(population.into_iter().map(Genome::new)),
+        0.8
+    );
 }
 
 const HOMOUGENEOUSNESS_THRESHOLD: f64 = 0.99;
@@ -339,10 +353,10 @@ where
             new_population: population,
             unique_specimens_selected,
         } = selection(&mut state, starting_population);
+        avg_fitness = state.record_run_stat(avg_fitness, &population, unique_specimens_selected);
         if is_convergant(&state, &population) {
             return state.finish_converged(&population);
         }
-        avg_fitness = state.record_run_stat(avg_fitness, &population, unique_specimens_selected);
         let population = crossover(&mut state, population);
         let population = mutation(&mut state, population);
         let population = evaluate(&mut state, population);
@@ -462,19 +476,23 @@ fn main() {
                 println!(
                     "Solved {}/{} ({}%)\tConfiguration #{i}: {}-{}/crossover={}/mutation={}/{}",
                     solved + 1,
-                    len * 100,
-                    (solved + 1) / len,
+                    len,
+                    (solved + 1) * 100 / len,
                     config.ty.0,
                     config.ty.1,
                     config.apply_crossover,
                     config.mutation_rate.is_some(),
                     config.selection,
                 );
-                for run_idx in 0..MAX_RUNS {
-                    let state = RunState::new(&config, run_idx);
-                    let (_key, _stats) = simulation(state);
-                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                }
+                let runs = (0..MAX_RUNS)
+                    .map(|run_idx| {
+                        let state = RunState::new(&config, run_idx);
+                        let (_key, stats) = simulation(state);
+                        stats
+                    })
+                    .collect();
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _stats = ConfigStats::new(runs);
             });
         }
         for (i, config) in config_100.into_iter().enumerate() {
@@ -485,18 +503,22 @@ fn main() {
                 println!(
                     "Solved {}/{} ({}%)\tConfiguration #{i}: {}/crossover={}/mutation={}/{}",
                     solved + 1,
-                    len * 100,
-                    (solved + 1) / len,
+                    len,
+                    (solved + 1) * 100 / len,
                     config.ty,
                     config.apply_crossover,
                     config.mutation_rate.is_some(),
                     config.selection,
                 );
-                for run_idx in 0..MAX_RUNS {
-                    let state = RunState::new(&config, run_idx);
-                    let (_key, _stats) = simulation(state);
-                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                }
+                let runs = (0..MAX_RUNS)
+                    .map(|run_idx| {
+                        let state = RunState::new(&config, run_idx);
+                        let (_key, stats) = simulation(state);
+                        stats
+                    })
+                    .collect();
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _stats = ConfigStats::new(runs);
             });
         }
     });
@@ -509,19 +531,23 @@ fn main() {
         println!(
             "Solved {}/{} ({}%)\tConfiguration #{i}: {}-{}/crossover={}/mutation={}/{}",
             solved + 1,
-            len * 100,
-            (solved + 1) / len,
+            len,
+            (solved + 1) * 100 / len,
             config.ty.0,
             config.ty.1,
             config.apply_crossover,
             config.mutation_rate.is_some(),
             config.selection,
         );
-        for run_idx in 0..MAX_RUNS {
-            let state = RunState::new(&config, run_idx);
-            let (_key, _stats) = simulation(state);
-            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
+        let runs = (0..MAX_RUNS)
+            .map(|run_idx| {
+                let state = RunState::new(&config, run_idx);
+                let (_key, stats) = simulation(state);
+                stats
+            })
+            .collect();
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _stats = ConfigStats::new(runs);
     }
     #[cfg(not(feature = "parallel"))]
     for (i, config) in config_100.into_iter().enumerate() {
@@ -531,17 +557,21 @@ fn main() {
         println!(
             "Solved {}/{} ({}%)\tConfiguration #{i}: {}/crossover={}/mutation={}/{}",
             solved + 1,
-            len * 100,
-            (solved + 1) / len,
+            len,
+            (solved + 1) * 100 / len,
             config.ty,
             config.apply_crossover,
             config.mutation_rate.is_some(),
             config.selection,
         );
-        for run_idx in 0..MAX_RUNS {
-            let state = RunState::new(&config, run_idx);
-            let (_key, _stats) = simulation(state);
-            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
+        let runs = (0..MAX_RUNS)
+            .map(|run_idx| {
+                let state = RunState::new(&config, run_idx);
+                let (_key, stats) = simulation(state);
+                stats
+            })
+            .collect();
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _stats = ConfigStats::new(runs);
     }
 }
