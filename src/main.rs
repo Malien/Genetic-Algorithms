@@ -367,7 +367,7 @@ fn config_permutations_100() -> Vec<AlgoConfig<G100>> {
     let mut res = vec![];
 
     perms! {
-        (population_size, mutation_rate) in [(10, 0.00001)];
+        (population_size, mutation_rate) in [(100, 0.00001)];
         apply_crossover in [true, false];
         apply_mutation in [true, false];
         selection_prob in [1.0, 0.8, 0.7, 0.6];
@@ -395,7 +395,7 @@ fn config_permutations_10() -> Vec<AlgoConfig<G10>> {
     let mut res = vec![];
 
     perms! {
-        (population_size, mutation_rate) in [(10, 0.0005)];
+        (population_size, mutation_rate) in [(100, 0.0005)];
         apply_crossover in [true, false];
         apply_mutation in [true, false];
         selection_prob in [1.0, 0.8, 0.7, 0.6];
