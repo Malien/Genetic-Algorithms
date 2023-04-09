@@ -11,10 +11,12 @@ use bitvec::{order::Lsb0, slice::BitSlice, BitArr};
 use decorum::{Finite, N64, R64};
 use num_traits::{real::Real, FromPrimitive};
 use operators::{crossover, mutation};
+use persistance::ConfigKey;
 use rand::rngs::StdRng;
 
 mod evaluation;
 mod operators;
+mod persistance;
 mod selection;
 mod stats;
 
@@ -23,55 +25,39 @@ use evaluation::{
     EvaluateFamily, GenomeEncoding, PheonotypeAlgo,
 };
 use selection::{selection, Selection, SelectionResult, TournamentReplacement};
-use stats::{RunStats, StatEncoder, SuccessFamily};
+use stats::{ConfigStats, RunStats, StatEncoder, SuccessFamily};
 
-use crate::stats::{ConfigStatsWithOptimum, ConfigStats};
+use crate::persistance::write_stats;
 
 const MAX_GENERATIONS: usize = 10_000_000;
 const MAX_RUNS: usize = 100;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct RunKey<T> {
-    algo_type: T,
-    population_size: usize,
-    apply_crossover: bool,
-    apply_mutation: bool,
-    selection: Selection,
-    run_idx: usize,
-}
-
-impl<T: std::fmt::Display> RunKey<T> {
-    fn to_path(&self) -> PathBuf {
-        let mut path = PathBuf::new();
-
-        let mut algo = String::new();
-        write!(algo, "{}", self.algo_type).unwrap();
-        if self.apply_crossover {
-            write!(algo, "-crossover").unwrap();
-        }
-        if self.apply_mutation {
-            write!(algo, "-mutation").unwrap();
-        }
-
-        path.push(algo);
-        path.push(format!("{}", self.population_size));
-        path.push(format!("{}", self.selection));
-        path.push(format!("{}", self.run_idx));
-        path
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct AlgoConfig<F: GenFamily + ?Sized>
 where
     [(); bitvec::mem::elts::<u16>(F::N)]:,
 {
-    ty: F::AlgoType,
-    population_size: usize,
-    apply_crossover: bool,
-    mutation_rate: Option<f64>,
-    selection: Selection,
-    optimal_specimen: Option<Genome<{ F::N }>>,
+    pub ty: F::AlgoType,
+    pub population_size: usize,
+    pub apply_crossover: bool,
+    pub mutation_rate: Option<f64>,
+    pub selection: Selection,
+    pub optimal_specimen: Option<Genome<{ F::N }>>,
+}
+
+impl<F: GenFamily + ?Sized> AlgoConfig<F>
+where
+    [(); bitvec::mem::elts::<u16>(F::N)]:,
+{
+    fn to_key(&self) -> ConfigKey<F::AlgoType> {
+        ConfigKey {
+            algo_type: self.ty,
+            population_size: self.population_size,
+            apply_crossover: self.apply_crossover,
+            apply_mutation: self.mutation_rate.is_some(),
+            selection: self.selection,
+        }
+    }
 }
 
 pub struct RunState<'a, F: GenFamily + ?Sized>
@@ -80,7 +66,6 @@ where
 {
     config: &'a AlgoConfig<F>,
     rng: StdRng,
-    run_idx: usize,
     stats: StatEncoder<'a, F>,
 }
 
@@ -93,7 +78,6 @@ where
             config,
             rng: rand::SeedableRng::seed_from_u64(run_idx as u64),
             stats: StatEncoder::new(config),
-            run_idx,
         }
     }
 
@@ -119,38 +103,12 @@ where
             .record_run_stat(pre_selection_fitness, population, unique_specimens_selected)
     }
 
-    fn finish_converged(
-        self,
-        final_population: &[EvaluatedGenome<{ F::N }>],
-    ) -> (RunKey<F::AlgoType>, RunStats) {
-        let key = RunKey {
-            algo_type: self.config.ty,
-            population_size: self.config.population_size,
-            apply_crossover: self.config.apply_crossover,
-            apply_mutation: self.config.mutation_rate.is_some(),
-            selection: self.config.selection,
-            run_idx: self.run_idx,
-        };
-
-        let stats = self.stats.finish_converged(final_population);
-        (key, stats)
+    fn finish_converged(self, final_population: &[EvaluatedGenome<{ F::N }>]) -> RunStats {
+        self.stats.finish_converged(final_population)
     }
 
-    fn finish_unconverged(
-        self,
-        final_population: &[EvaluatedGenome<{ F::N }>],
-    ) -> (RunKey<F::AlgoType>, RunStats) {
-        let key = RunKey {
-            algo_type: self.config.ty,
-            population_size: self.config.population_size,
-            apply_crossover: self.config.apply_crossover,
-            apply_mutation: self.config.mutation_rate.is_some(),
-            selection: self.config.selection,
-            run_idx: self.run_idx,
-        };
-
-        let stats = self.stats.finish_unconverged(final_population);
-        (key, stats)
+    fn finish_unconverged(self, final_population: &[EvaluatedGenome<{ F::N }>]) -> RunStats {
+        self.stats.finish_unconverged(final_population)
     }
 }
 
@@ -225,7 +183,7 @@ where
 
 pub trait GenFamily {
     const N: usize;
-    type AlgoType: Copy;
+    type AlgoType: Copy + ToPath;
 }
 pub struct G10;
 pub struct G100;
@@ -341,7 +299,7 @@ where
     population.iter().map(|g| g.fitness).sum::<N64>() / N64::from_usize(population.len()).unwrap()
 }
 
-fn simulation<F: FullFamily>(mut state: RunState<F>) -> (RunKey<F::AlgoType>, RunStats)
+fn simulation<F: FullFamily>(mut state: RunState<F>) -> RunStats
 where
     [(); bitvec::mem::elts::<u16>(F::N)]:,
 {
@@ -403,7 +361,7 @@ fn config_permutations_100() -> Vec<AlgoConfig<G100>> {
     let mut res = vec![];
 
     perms! {
-        (population_size, mutation_rate) in [(100, 0.00001)];
+        (population_size, mutation_rate) in [(10, 0.00001)];
         apply_crossover in [true, false];
         apply_mutation in [true, false];
         selection_prob in [1.0, 0.8, 0.7, 0.6];
@@ -431,7 +389,7 @@ fn config_permutations_10() -> Vec<AlgoConfig<G10>> {
     let mut res = vec![];
 
     perms! {
-        (population_size, mutation_rate) in [(100, 0.0005)];
+        (population_size, mutation_rate) in [(10, 0.0005)];
         apply_crossover in [true, false];
         apply_mutation in [true, false];
         selection_prob in [1.0, 0.8, 0.7, 0.6];
@@ -459,6 +417,65 @@ fn config_permutations_10() -> Vec<AlgoConfig<G10>> {
     res
 }
 
+pub trait ToPath {
+    fn to_path(&self) -> PathBuf;
+}
+
+impl ToPath for BinaryAlgo {
+    fn to_path(&self) -> PathBuf {
+        match self {
+            BinaryAlgo::FConst => PathBuf::from("FConst"),
+            BinaryAlgo::FHD { sigma } => {
+                let mut buf = PathBuf::with_capacity(16);
+                buf.push("FHD");
+                buf.push(format!("sigma={sigma}"));
+                buf
+            }
+        }
+    }
+}
+
+impl ToPath for (PheonotypeAlgo, GenomeEncoding) {
+    fn to_path(&self) -> PathBuf {
+        let mut buf = PathBuf::with_capacity(16);
+        match self.0 {
+            PheonotypeAlgo::Pow1 => buf.push("Pow1"),
+            PheonotypeAlgo::Pow2 => buf.push("Pow2"),
+        }
+        match self.1 {
+            GenomeEncoding::Binary => buf.push("binary"),
+            GenomeEncoding::BinaryGray => buf.push("gray"),
+        }
+        buf
+    }
+}
+
+fn run_config<F: FullFamily>(len: usize, counter: &AtomicUsize, config: AlgoConfig<F>)
+where
+    [(); bitvec::mem::elts::<u16>(F::N)]:,
+{
+    let solved = counter.load(std::sync::atomic::Ordering::SeqCst);
+    println!(
+        "Solved {}/{} ({}%)\tConfiguration: {}/crossover={}/mutation={}/{}",
+        solved + 1,
+        len,
+        (solved + 1) * 100 / len,
+        config.ty.to_path().as_os_str().to_str().unwrap(),
+        config.apply_crossover,
+        config.mutation_rate.is_some(),
+        config.selection,
+    );
+    let runs = (0..MAX_RUNS)
+        .map(|run_idx| {
+            let state = RunState::new(&config, run_idx);
+            simulation(state)
+        })
+        .collect();
+    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let stats = ConfigStats::new(runs);
+    write_stats(config.to_key(), stats).unwrap();
+}
+
 fn main() {
     let config_10 = config_permutations_10();
     let config_100 = config_permutations_100();
@@ -468,110 +485,24 @@ fn main() {
 
     #[cfg(feature = "parallel")]
     rayon::scope(|s| {
-        for (i, config) in config_10.into_iter().enumerate() {
+        for config in config_10 {
             let counter = &counter;
             s.spawn(move |_| {
-                // println!("Running config: {:#?}", config);
-                let solved = counter.load(std::sync::atomic::Ordering::SeqCst);
-                println!(
-                    "Solved {}/{} ({}%)\tConfiguration #{i}: {}-{}/crossover={}/mutation={}/{}",
-                    solved + 1,
-                    len,
-                    (solved + 1) * 100 / len,
-                    config.ty.0,
-                    config.ty.1,
-                    config.apply_crossover,
-                    config.mutation_rate.is_some(),
-                    config.selection,
-                );
-                let runs = (0..MAX_RUNS)
-                    .map(|run_idx| {
-                        let state = RunState::new(&config, run_idx);
-                        let (_key, stats) = simulation(state);
-                        stats
-                    })
-                    .collect();
-                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let _stats = ConfigStats::new(runs);
+                run_config(len, counter, config);
             });
         }
-        for (i, config) in config_100.into_iter().enumerate() {
+        for config in config_100 {
             let counter = &counter;
-            s.spawn(move |_| {
-                // println!("Running config: {:#?}", config);
-                let solved = counter.load(std::sync::atomic::Ordering::SeqCst);
-                println!(
-                    "Solved {}/{} ({}%)\tConfiguration #{i}: {}/crossover={}/mutation={}/{}",
-                    solved + 1,
-                    len,
-                    (solved + 1) * 100 / len,
-                    config.ty,
-                    config.apply_crossover,
-                    config.mutation_rate.is_some(),
-                    config.selection,
-                );
-                let runs = (0..MAX_RUNS)
-                    .map(|run_idx| {
-                        let state = RunState::new(&config, run_idx);
-                        let (_key, stats) = simulation(state);
-                        stats
-                    })
-                    .collect();
-                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let _stats = ConfigStats::new(runs);
-            });
+            s.spawn(move |_| run_config(len, counter, config));
         }
     });
 
     #[cfg(not(feature = "parallel"))]
-    for (i, config) in config_10.into_iter().enumerate() {
-        let counter = &counter;
-        // println!("Running config: {:#?}", config);
-        let solved = counter.load(std::sync::atomic::Ordering::SeqCst);
-        println!(
-            "Solved {}/{} ({}%)\tConfiguration #{i}: {}-{}/crossover={}/mutation={}/{}",
-            solved + 1,
-            len,
-            (solved + 1) * 100 / len,
-            config.ty.0,
-            config.ty.1,
-            config.apply_crossover,
-            config.mutation_rate.is_some(),
-            config.selection,
-        );
-        let runs = (0..MAX_RUNS)
-            .map(|run_idx| {
-                let state = RunState::new(&config, run_idx);
-                let (_key, stats) = simulation(state);
-                stats
-            })
-            .collect();
-        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let _stats = ConfigStats::new(runs);
+    for config in config_10 {
+        run_config(len, &counter, config)
     }
     #[cfg(not(feature = "parallel"))]
-    for (i, config) in config_100.into_iter().enumerate() {
-        let counter = &counter;
-        // println!("Running config: {:#?}", config);
-        let solved = counter.load(std::sync::atomic::Ordering::SeqCst);
-        println!(
-            "Solved {}/{} ({}%)\tConfiguration #{i}: {}/crossover={}/mutation={}/{}",
-            solved + 1,
-            len,
-            (solved + 1) * 100 / len,
-            config.ty,
-            config.apply_crossover,
-            config.mutation_rate.is_some(),
-            config.selection,
-        );
-        let runs = (0..MAX_RUNS)
-            .map(|run_idx| {
-                let state = RunState::new(&config, run_idx);
-                let (_key, stats) = simulation(state);
-                stats
-            })
-            .collect();
-        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let _stats = ConfigStats::new(runs);
+    for config in config_100 {
+        run_config(len, &counter, config)
     }
 }
