@@ -292,7 +292,7 @@ pub mod pow2 {
     use crate::Genome;
 
     pub fn optimal_specimen() -> Genome<10> {
-        Genome::new(bitarr![u16, Lsb0; 0, 1, 1, 1, 1, 1, 1, 1, 1, 1])
+        Genome::new(bitarr![u16, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1, 1, 0])
     }
 
     pub fn encode_binary(pheonotype: f64) -> Genome<10> {
@@ -302,11 +302,18 @@ pub mod pow2 {
 
     pub fn decode_binary(genome: Genome<10>) -> N64 {
         let [pheonotype] = genome.into_inner();
-        N64::from_u16(pheonotype).unwrap() / 100.0 - 511.0
+        N64::from_u16(pheonotype).unwrap() / 100.0 - 5.11
     }
 
     pub fn fitness(pheonotype: N64) -> N64 {
         let _512 = N64::from(512.0);
         (_512 - pheonotype) * (_512 + pheonotype)
+    }
+
+    #[test]
+    fn test_decode_binary() {
+        let genome = optimal_specimen();
+        assert_eq!(genome.into_inner(), [0b0111111111]);
+        assert_eq!(decode_binary(genome), 0.0);
     }
 }
