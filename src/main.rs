@@ -1,17 +1,13 @@
 #![feature(iter_array_chunks)]
 #![feature(generic_const_exprs)]
 use std::{
-    fmt::Write,
     ops::{Deref, DerefMut},
-    path::PathBuf,
-    sync::atomic::AtomicUsize,
+    sync::{atomic::AtomicUsize, Mutex},
 };
 
 use bitvec::{order::Lsb0, slice::BitSlice, BitArr};
 use decorum::{Finite, N64, R64};
 use num_traits::{real::Real, FromPrimitive};
-use operators::{crossover, mutation};
-use persistance::ConfigKey;
 use rand::rngs::StdRng;
 
 mod evaluation;
@@ -26,8 +22,11 @@ use evaluation::{
 };
 use selection::{selection, Selection, SelectionResult, TournamentReplacement};
 use stats::{ConfigStats, RunStats, StatEncoder, SuccessFamily};
+use persistance::{write_stats, ConfigKey};
+use operators::{crossover, mutation};
 
-use crate::persistance::write_stats;
+use crate::persistance::{create_config_writer, append_config};
+
 
 const MAX_GENERATIONS: usize = 10_000_000;
 const MAX_RUNS: usize = 100;
@@ -116,21 +115,6 @@ where
     }
 }
 
-// I don't think we should disambiguate between genome lengths on the type level for now.
-// I think the biggest win would be from removing allocations.
-//
-// Disabmiguation on the type level may help, since it would allow to pack smaller genomes more
-// efficiently into a cache line.
-//
-// The idea would be to store a 128 bit wide array, and a usize to indicate the length.
-// Afterwards just implement deref to the BitSlice of the desired size.
-// This is basiacally what ArrayVec crate does, but for bitvecs
-//
-// Alternatively, we may pack the 120 bit wide array, and an u8 size. This may improve struct
-// aligmnet. (Or if the struct is not packed, we may use a 112 bit wide array, and a u16 size)
-// Either way, the fine-grained research is not worth it, since I am striving towards type level
-// disambiguation in the end.
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Genome<const N: usize>
 where
@@ -185,9 +169,44 @@ where
     }
 }
 
+pub trait AlgoDescriptor {
+    fn name(&self) -> &'static str;
+    fn args(&self) -> Option<String>;
+}
+
+impl AlgoDescriptor for BinaryAlgo {
+    fn name(&self) -> &'static str {
+        match self {
+            BinaryAlgo::FConst => "FConst",
+            BinaryAlgo::FHD { .. } => "FHD",
+        }
+    }
+    fn args(&self) -> Option<String> {
+        match self {
+            BinaryAlgo::FConst => None,
+            BinaryAlgo::FHD { sigma } => Some(format!("sigma={}", sigma)),
+        }
+    }
+}
+
+impl AlgoDescriptor for (PheonotypeAlgo, GenomeEncoding) {
+    fn name(&self) -> &'static str {
+        match self.0 {
+            PheonotypeAlgo::Pow1 => "Pow1",
+            PheonotypeAlgo::Pow2 => "Pow2",
+        }
+    }
+    fn args(&self) -> Option<String> {
+        match self.1 {
+            GenomeEncoding::Binary => Some("binary".to_string()),
+            GenomeEncoding::BinaryGray => Some("gray".to_string()),
+        }
+    }
+}
+
 pub trait GenFamily {
     const N: usize;
-    type AlgoType: Copy + ToPath;
+    type AlgoType: Copy + AlgoDescriptor;
 }
 pub struct G10;
 pub struct G100;
@@ -423,50 +442,18 @@ fn config_permutations_10() -> Vec<AlgoConfig<G10>> {
     res
 }
 
-pub trait ToPath {
-    fn to_path(&self) -> PathBuf;
-}
-
-impl ToPath for BinaryAlgo {
-    fn to_path(&self) -> PathBuf {
-        match self {
-            BinaryAlgo::FConst => PathBuf::from("FConst"),
-            BinaryAlgo::FHD { sigma } => {
-                let mut buf = PathBuf::with_capacity(16);
-                buf.push("FHD");
-                buf.push(format!("sigma={sigma}"));
-                buf
-            }
-        }
-    }
-}
-
-impl ToPath for (PheonotypeAlgo, GenomeEncoding) {
-    fn to_path(&self) -> PathBuf {
-        let mut buf = PathBuf::with_capacity(16);
-        match self.0 {
-            PheonotypeAlgo::Pow1 => buf.push("Pow1"),
-            PheonotypeAlgo::Pow2 => buf.push("Pow2"),
-        }
-        match self.1 {
-            GenomeEncoding::Binary => buf.push("binary"),
-            GenomeEncoding::BinaryGray => buf.push("gray"),
-        }
-        buf
-    }
-}
-
-fn run_config<F: FullFamily>(len: usize, counter: &AtomicUsize, config: AlgoConfig<F>)
+fn run_config<F: FullFamily>(len: usize, counter: &AtomicUsize, config_writer: &Mutex<csv::Writer<impl std::io::Write>>, config: AlgoConfig<F>)
 where
     [(); bitvec::mem::elts::<u16>(F::N)]:,
 {
     let solved = counter.load(std::sync::atomic::Ordering::SeqCst);
     println!(
-        "Solved {}/{} ({}%)\tConfiguration: {}/crossover={}/mutation={}/{}",
+        "Solved {}/{} ({}%)\tConfiguration: {}-{}/crossover={}/mutation={}/{}",
         solved + 1,
         len,
         (solved + 1) * 100 / len,
-        config.ty.to_path().as_os_str().to_str().unwrap(),
+        config.ty.name(),
+        config.ty.args().unwrap_or_default(),
         config.apply_crossover,
         config.mutation_rate.is_some(),
         config.selection,
@@ -479,13 +466,16 @@ where
         .collect();
     counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let stats = ConfigStats::new(runs);
-    write_stats(config.to_key(), stats).unwrap();
+    write_stats(config.to_key(), &stats).unwrap();
+    let mut writer = config_writer.lock().unwrap();
+    append_config(writer.deref_mut(), config.to_key(), &stats).unwrap();
 }
 
 fn main() {
     let config_10 = config_permutations_10();
     let config_100 = config_permutations_100();
     let len = config_10.len() + config_100.len();
+    let config_writer = Mutex::new(create_config_writer().unwrap());
     println!("Running {} configs", len);
     let counter = AtomicUsize::new(0);
 
@@ -493,22 +483,24 @@ fn main() {
     rayon::scope(|s| {
         for config in config_10 {
             let counter = &counter;
+            let config_writer = &config_writer;
             s.spawn(move |_| {
-                run_config(len, counter, config);
+                run_config(len, counter, config_writer, config);
             });
         }
         for config in config_100 {
             let counter = &counter;
-            s.spawn(move |_| run_config(len, counter, config));
+            let config_writer = &config_writer;
+            s.spawn(move |_| run_config(len, counter, config_writer, config));
         }
     });
 
     #[cfg(not(feature = "parallel"))]
     for config in config_10 {
-        run_config(len, &counter, config)
+        run_config(len, &counter, &config_writer, config)
     }
     #[cfg(not(feature = "parallel"))]
     for config in config_100 {
-        run_config(len, &counter, config)
+        run_config(len, &counter, &config_writer, config)
     }
 }
