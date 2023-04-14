@@ -88,6 +88,7 @@ pub struct OptimumlessRunStats {
     pub avg_theta: N64,
 }
 
+#[derive(Debug, Clone)]
 pub struct OptimumlessConfigStats {
     pub runs: Vec<OptimumlessRunStats>,
 
@@ -233,6 +234,7 @@ impl OptimumlessConfigStats {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct ConfigStatsWithOptimum {
     pub runs: Vec<RunStatsWithOptimum>,
 

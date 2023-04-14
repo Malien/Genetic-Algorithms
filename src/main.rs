@@ -2,13 +2,15 @@
 #![feature(generic_const_exprs)]
 use std::{
     ops::{Deref, DerefMut},
-    sync::{atomic::AtomicUsize, Mutex},
+    sync::{atomic::AtomicUsize, Mutex, Arc},
 };
 
 use bitvec::{order::Lsb0, slice::BitSlice, BitArr};
 use decorum::{Finite, N64, R64};
 use num_traits::{real::Real, FromPrimitive};
 use rand::rngs::StdRng;
+use nonzero_ext::*;
+use governor::{Quota, RateLimiter, state::{NotKeyed, InMemoryState}, clock::DefaultClock};
 
 mod evaluation;
 mod operators;
@@ -20,12 +22,12 @@ use evaluation::{
     binary_to_gray, evaluate, optimal_binary_specimen, optimal_pheonotype_specimen, BinaryAlgo,
     EvaluateFamily, GenomeEncoding, PheonotypeAlgo,
 };
+use operators::{crossover, mutation};
+use persistance::{write_stats, ConfigKey};
 use selection::{selection, Selection, SelectionResult, TournamentReplacement};
 use stats::{ConfigStats, RunStats, StatEncoder, SuccessFamily};
-use persistance::{write_stats, ConfigKey};
-use operators::{crossover, mutation};
 
-use crate::persistance::{create_config_writer, append_config};
+use crate::persistance::{append_config, create_config_writer};
 
 const MAX_GENERATIONS: usize = 10_000_000;
 const MAX_RUNS: usize = 100;
@@ -441,16 +443,28 @@ fn config_permutations_10() -> Vec<AlgoConfig<G10>> {
     res
 }
 
-fn run_config<F: FullFamily>(len: usize, counter: &AtomicUsize, config_writer: &Mutex<csv::Writer<impl std::io::Write>>, config: AlgoConfig<F>)
+pub type SimpleLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
+
+struct ProgramState<W: std::io::Write> {
+    file_limiter: Arc<tokio::sync::Semaphore>,
+    runtime: tokio::runtime::Handle,
+    config_writer: Mutex<csv::Writer<W>>,
+    write_tasks: Mutex<tokio::task::JoinSet<()>>,
+    counter: AtomicUsize,
+    len: usize,
+}
+
+fn run_config<F: FullFamily>(state: &ProgramState<impl std::io::Write>, config: AlgoConfig<F>)
 where
     [(); bitvec::mem::elts::<u16>(F::N)]:,
+    F::AlgoType: Send + 'static
 {
-    let solved = counter.load(std::sync::atomic::Ordering::SeqCst);
+    let solved = state.counter.load(std::sync::atomic::Ordering::SeqCst);
     println!(
         "Solved {}/{} ({}%)\tConfiguration: {}-{}/crossover={}/mutation={}/{}",
         solved + 1,
-        len,
-        (solved + 1) * 100 / len,
+        state.len,
+        (solved + 1) * 100 / state.len,
         config.ty.name(),
         config.ty.args().unwrap_or_default(),
         config.apply_crossover,
@@ -459,47 +473,69 @@ where
     );
     let runs = (0..MAX_RUNS)
         .map(|run_idx| {
-            let state = RunState::new(&config, run_idx);
-            simulation(state)
+            let run_state = RunState::new(&config, run_idx);
+            simulation(run_state)
         })
         .collect();
-    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let stats = ConfigStats::new(runs);
-    write_stats(config.to_key(), &stats).unwrap();
-    let mut writer = config_writer.lock().unwrap();
-    append_config(writer.deref_mut(), config.to_key(), &stats).unwrap();
+    state
+        .counter
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let stats = Arc::new(ConfigStats::new(runs));
+
+    let mut write_tasks = state.write_tasks.lock().unwrap();
+    write_tasks.spawn_on({
+        let key = config.to_key();
+        let stats = Arc::clone(&stats);
+        let file_limiter = Arc::clone(&state.file_limiter);
+        async move {
+            write_stats(file_limiter.as_ref(), key, stats.as_ref()).await.unwrap();
+        }
+    }, &state.runtime);
+    drop(write_tasks);
+
+    let mut writer = state.config_writer.lock().unwrap();
+    append_config(writer.deref_mut(), config.to_key(), stats.as_ref()).unwrap();
 }
 
 fn main() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
     let config_10 = config_permutations_10();
     let config_100 = config_permutations_100();
-    let len = config_10.len() + config_100.len();
-    let config_writer = Mutex::new(create_config_writer().unwrap());
-    println!("Running {} configs", len);
-    let counter = AtomicUsize::new(0);
+    let program_state = ProgramState {
+        file_limiter: Arc::new(tokio::sync::Semaphore::new(200)),
+        config_writer: Mutex::new(create_config_writer().unwrap()),
+        write_tasks: Mutex::new(tokio::task::JoinSet::new()),
+        counter: AtomicUsize::new(0),
+        len: config_10.len() + config_100.len(),
+        runtime: runtime.handle().clone()
+    };
+    println!("Running {} configs", program_state.len);
 
     #[cfg(feature = "parallel")]
     rayon::scope(|s| {
         for config in config_10 {
-            let counter = &counter;
-            let config_writer = &config_writer;
-            s.spawn(move |_| {
-                run_config(len, counter, config_writer, config);
-            });
+            let program_state = &program_state;
+            s.spawn(move |_| run_config(program_state, config));
         }
         for config in config_100 {
-            let counter = &counter;
-            let config_writer = &config_writer;
-            s.spawn(move |_| run_config(len, counter, config_writer, config));
+            let program_state = &program_state;
+            s.spawn(move |_| run_config(program_state, config));
         }
     });
 
     #[cfg(not(feature = "parallel"))]
     for config in config_10 {
-        run_config(len, &counter, &config_writer, config)
+        run_config(&program_state, config);
     }
     #[cfg(not(feature = "parallel"))]
     for config in config_100 {
-        run_config(len, &counter, &config_writer, config)
+        run_config(&program_state, config);
     }
+
+    println!("Finished running all configs. Waiting for writes to complete...");
+
+    runtime.block_on(async move {
+        let mut program_state = program_state.write_tasks.into_inner().unwrap();
+        while let Some(_) = program_state.join_next().await {}
+    });
 }

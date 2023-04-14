@@ -11,8 +11,13 @@ parallel = ["dep:rayon"]
 arrayvec = "0.7.2"
 bitvec = "1.0.1"
 csv = "1.2.1"
+csv-async = { version = "1.2.6", features = ["tokio"] }
 decorum = "0.3.1"
+futures = "0.3.28"
+governor = "0.5.1"
+nonzero_ext = "0.3.0"
 num = "0.4.0"
 num-traits = "0.2.15"
 rand = "0.8.5"
 rayon = { version = "1.7.0", optional = true }
+tokio = { version = "1.27.0", features = ["full"] }
