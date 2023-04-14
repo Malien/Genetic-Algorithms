@@ -4,7 +4,6 @@ use std::{
 };
 
 use futures::future::try_join;
-use governor::Jitter;
 
 use crate::{
     selection::{Selection, TournamentReplacement},
@@ -12,8 +11,10 @@ use crate::{
         ConfigStats, ConfigStatsWithOptimum, OptimumDisabiguity, OptimumlessConfigStats,
         OptimumlessRunStats, PopulationStats, RunStatsWithOptimum,
     },
-    AlgoDescriptor, SimpleLimiter,
+    AlgoDescriptor,
 };
+
+pub type CSVFile = csv_async::AsyncWriter<tokio::fs::File>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConfigKey<T> {
@@ -92,11 +93,12 @@ impl<T: AlgoDescriptor> ConfigKey<T> {
     }
 }
 
-pub fn create_config_writer() -> io::Result<csv::Writer<impl std::io::Write>> {
-    std::fs::create_dir_all("data")?;
-    let file = std::fs::File::create("data/stats.csv")?;
-    let writer = std::io::BufWriter::new(file);
-    let mut writer = csv::Writer::from_writer(writer);
+pub async fn create_config_writer() -> io::Result<CSVFile> {
+    tokio::fs::create_dir_all("data").await?;
+    let file = tokio::fs::File::create("data/stats.csv").await?;
+    let mut writer = csv_async::AsyncWriterBuilder::new()
+        .buffer_capacity(256 * 1024)
+        .create_writer(file);
 
     writer.write_record([
         "algo_name",
@@ -151,28 +153,26 @@ pub fn create_config_writer() -> io::Result<csv::Writer<impl std::io::Write>> {
         "min_theta_std_dev",
         "max_theta_std_dev",
         "avg_theta_std_dev",
-    ])?;
+    ]).await?;
 
     Ok(writer)
 }
 
-pub fn append_config<T: AlgoDescriptor>(
-    writer: &mut csv::Writer<impl std::io::Write>,
+pub async fn append_config<T: AlgoDescriptor>(
+    writer: &mut CSVFile,
     key: ConfigKey<T>,
     stats: &ConfigStats,
 ) -> io::Result<()> {
     use OptimumDisabiguity::*;
 
     match stats {
-        WithOptimum(stats) => append_config_with_optimum(writer, key, stats),
-        Optimumless(stats) => append_config_optimumless(writer, key, stats),
-    }?;
-
-    Ok(())
+        WithOptimum(stats) => append_config_with_optimum(writer, key, stats).await,
+        Optimumless(stats) => append_config_optimumless(writer, key, stats).await,
+    }
 }
 
-fn append_config_with_optimum<T: AlgoDescriptor>(
-    writer: &mut csv::Writer<impl std::io::Write>,
+async fn append_config_with_optimum<T: AlgoDescriptor>(
+    writer: &mut CSVFile,
     key: ConfigKey<T>,
     stats: &ConfigStatsWithOptimum,
 ) -> io::Result<()> {
@@ -301,13 +301,13 @@ fn append_config_with_optimum<T: AlgoDescriptor>(
             .avg_theta_std_dev
             .map(|v| v.to_string())
             .unwrap_or_default(),
-    ])?;
+    ]).await?;
 
     Ok(())
 }
 
-fn append_config_optimumless<T: AlgoDescriptor>(
-    writer: &mut csv::Writer<impl std::io::Write>,
+async fn append_config_optimumless<T: AlgoDescriptor>(
+    writer: &mut CSVFile,
     key: ConfigKey<T>,
     stats: &OptimumlessConfigStats,
 ) -> io::Result<()> {
@@ -427,7 +427,7 @@ fn append_config_optimumless<T: AlgoDescriptor>(
             .avg_theta_std_dev
             .map(|v| v.to_string())
             .unwrap_or_default(),
-    ])?;
+    ]).await?;
 
     Ok(())
 }
@@ -447,10 +447,6 @@ pub async fn write_stats<T: AlgoDescriptor>(
     println!("Wrote stats for {:?}", path);
 
     Ok(())
-}
-
-fn jitter() -> Jitter {
-    Jitter::up_to(std::time::Duration::from_millis(100))
 }
 
 async fn write_optimumless(
@@ -511,7 +507,7 @@ async fn write_optimumless(
     //         .runs
     //         .iter()
     //         .zip(1..)
-    //         .map(|(run, n)| write_run_optimumless(path.join(format!("{n}")), run)),
+    //         .map(|(run, n)| write_run_optimumless(file_limiter, path.join(format!("{n}")), run)),
     // );
 
     let runs_write = async {
@@ -620,7 +616,7 @@ async fn write_with_optimum(
     //         .runs
     //         .iter()
     //         .zip(1..)
-    //         .map(|(run, n)| write_run_with_optimum(path.join(format!("{n}")), run)),
+    //         .map(|(run, n)| write_run_with_optimum(file_limiter, path.join(format!("{n}")), run)),
     // );
 
     let runs_write = async {
@@ -681,9 +677,10 @@ async fn write_run_with_optimum(
     //         .iter()
     //         .enumerate()
     //         .map(|(idx, population)| {
-    //             write_iteration_population(path.join(format!("{idx}")), population.iter())
+    //             write_iteration_population(file_limiter, path.join(format!("{idx}")), population.iter())
     //         })
     //         .chain(std::iter::once(write_iteration_population(
+    //             file_limiter,
     //             path.join("final"),
     //             run.final_population.iter(),
     //         ))),
@@ -746,9 +743,10 @@ async fn write_run_optimumless(
     //         .iter()
     //         .enumerate()
     //         .map(|(idx, population)| {
-    //             write_iteration_population(path.join(format!("{idx}")), population.iter())
+    //             write_iteration_population(file_limiter, path.join(format!("{idx}")), population.iter())
     //         })
     //         .chain(std::iter::once(write_iteration_population(
+    //             file_limiter,
     //             path.join("final"),
     //             run.final_population.iter(),
     //         ))),

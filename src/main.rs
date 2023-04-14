@@ -2,15 +2,13 @@
 #![feature(generic_const_exprs)]
 use std::{
     ops::{Deref, DerefMut},
-    sync::{atomic::AtomicUsize, Mutex, Arc},
+    sync::{atomic::AtomicUsize, Arc},
 };
 
 use bitvec::{order::Lsb0, slice::BitSlice, BitArr};
 use decorum::{Finite, N64, R64};
 use num_traits::{real::Real, FromPrimitive};
 use rand::rngs::StdRng;
-use nonzero_ext::*;
-use governor::{Quota, RateLimiter, state::{NotKeyed, InMemoryState}, clock::DefaultClock};
 
 mod evaluation;
 mod operators;
@@ -23,7 +21,7 @@ use evaluation::{
     EvaluateFamily, GenomeEncoding, PheonotypeAlgo,
 };
 use operators::{crossover, mutation};
-use persistance::{write_stats, ConfigKey};
+use persistance::{write_stats, ConfigKey, CSVFile};
 use selection::{selection, Selection, SelectionResult, TournamentReplacement};
 use stats::{ConfigStats, RunStats, StatEncoder, SuccessFamily};
 
@@ -443,21 +441,19 @@ fn config_permutations_10() -> Vec<AlgoConfig<G10>> {
     res
 }
 
-pub type SimpleLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
-
-struct ProgramState<W: std::io::Write> {
+struct ProgramState {
     file_limiter: Arc<tokio::sync::Semaphore>,
     runtime: tokio::runtime::Handle,
-    config_writer: Mutex<csv::Writer<W>>,
-    write_tasks: Mutex<tokio::task::JoinSet<()>>,
+    config_writer: Arc<tokio::sync::Mutex<CSVFile>>,
+    write_tasks: std::sync::Mutex<tokio::task::JoinSet<()>>,
     counter: AtomicUsize,
     len: usize,
 }
 
-fn run_config<F: FullFamily>(state: &ProgramState<impl std::io::Write>, config: AlgoConfig<F>)
+fn run_config<F: FullFamily>(state: &ProgramState, config: AlgoConfig<F>)
 where
     [(); bitvec::mem::elts::<u16>(F::N)]:,
-    F::AlgoType: Send + 'static
+    F::AlgoType: Send + Sync + 'static
 {
     let solved = state.counter.load(std::sync::atomic::Ordering::SeqCst);
     println!(
@@ -491,20 +487,27 @@ where
             write_stats(file_limiter.as_ref(), key, stats.as_ref()).await.unwrap();
         }
     }, &state.runtime);
-    drop(write_tasks);
 
-    let mut writer = state.config_writer.lock().unwrap();
-    append_config(writer.deref_mut(), config.to_key(), stats.as_ref()).unwrap();
+    write_tasks.spawn_on({
+        let stats = Arc::clone(&stats);
+        let key = config.to_key();
+        let config_writer = Arc::clone(&state.config_writer);
+        async move {
+            let mut writer = config_writer.lock().await;
+            append_config(writer.deref_mut(), key, stats.as_ref()).await.unwrap();
+        }
+    }, &state.runtime);
 }
 
 fn main() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let config_10 = config_permutations_10();
     let config_100 = config_permutations_100();
+    let config_writer = runtime.block_on(create_config_writer()).unwrap();
     let program_state = ProgramState {
-        file_limiter: Arc::new(tokio::sync::Semaphore::new(200)),
-        config_writer: Mutex::new(create_config_writer().unwrap()),
-        write_tasks: Mutex::new(tokio::task::JoinSet::new()),
+        file_limiter: Arc::new(tokio::sync::Semaphore::new(10)),
+        config_writer: Arc::new(tokio::sync::Mutex::new(config_writer)),
+        write_tasks: std::sync::Mutex::new(tokio::task::JoinSet::new()),
         counter: AtomicUsize::new(0),
         len: config_10.len() + config_100.len(),
         runtime: runtime.handle().clone()
@@ -535,7 +538,9 @@ fn main() {
     println!("Finished running all configs. Waiting for writes to complete...");
 
     runtime.block_on(async move {
-        let mut program_state = program_state.write_tasks.into_inner().unwrap();
-        while let Some(_) = program_state.join_next().await {}
+        let mut config_writer = Arc::try_unwrap(program_state.config_writer).unwrap().into_inner();
+        config_writer.flush().await.unwrap();
+        let mut write_tasks = program_state.write_tasks.into_inner().unwrap();
+        while let Some(_) = write_tasks.join_next().await {}
     });
 }
