@@ -60,29 +60,33 @@ where [(); bitvec::mem::elts::<u16>(N)]:
     pub unique_specimens_selected: usize,
 }
 
-fn stochastic_tournament_selection_with_replacement<const N: usize>(
+fn stochastic_tournament_selection_without_replacement<const N: usize>(
     initial_population: Vec<EvaluatedGenome<N>>,
     chance: R64,
     rng: &mut impl rand::Rng,
 ) -> SelectionResult<N> 
 where [(); bitvec::mem::elts::<u16>(N)]:
 {
-    let mut population = Vec::with_capacity(initial_population.len() * 2);
-    population.extend(initial_population.iter().cloned().enumerate());
+    let len = initial_population.len();
+    assert!(len % 2 == 0, "Population size must be even. Given vec of size {}", initial_population.len());
+    let mut population = Vec::with_capacity(len);
     population.extend(initial_population.into_iter().enumerate());
-    population.shuffle(rng);
-    let winners = population
-        .into_iter()
-        .array_chunks::<2>()
-        .map(|[specimen_a, specimen_b]| {
-            let (looser, winner) = minmax_by(specimen_a, specimen_b, |(_idx, specimen)| specimen.fitness);
-            let (winner, _) = reroll_winner(winner, looser, chance, rng);
-            winner
-        });
 
-    let mut new_population = Vec::with_capacity(winners.len());
-    let mut winner_indecies = HashSet::with_capacity(winners.len());
-    for (winner_idx, winner) in winners {
+    let mut new_population = Vec::with_capacity(len);
+    let mut winner_indecies = HashSet::with_capacity(len);
+
+    population.shuffle(rng);
+    for [&specimen_a, &specimen_b] in population.iter().array_chunks::<2>() {
+        let (looser, winner) = minmax_by(specimen_a, specimen_b, |(_idx, specimen)| specimen.fitness);
+        let ((winner_idx, winner), _) = reroll_winner(winner, looser, chance, rng);
+        new_population.push(winner);
+        winner_indecies.insert(winner_idx);
+    }
+
+    population.shuffle(rng);
+    for [specimen_a, specimen_b] in population.into_iter().array_chunks::<2>() {
+        let (looser, winner) = minmax_by(specimen_a, specimen_b, |(_idx, specimen)| specimen.fitness);
+        let ((winner_idx, winner), _) = reroll_winner(winner, looser, chance, rng);
         new_population.push(winner);
         winner_indecies.insert(winner_idx);
     }
@@ -93,7 +97,7 @@ where [(); bitvec::mem::elts::<u16>(N)]:
     }
 }
 
-fn stochastic_tournament_selection_without_replacement<const N: usize>(
+fn stochastic_tournament_selection_with_replacement<const N: usize>(
     initial_population: Vec<EvaluatedGenome<N>>,
     chance: R64,
     rng: &mut impl rand::Rng,

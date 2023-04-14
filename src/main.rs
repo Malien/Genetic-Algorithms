@@ -27,7 +27,6 @@ use operators::{crossover, mutation};
 
 use crate::persistance::{create_config_writer, append_config};
 
-
 const MAX_GENERATIONS: usize = 10_000_000;
 const MAX_RUNS: usize = 100;
 
