@@ -3,9 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use futures::future::try_join;
+use futures::{future::try_join, try_join};
 
 use crate::{
+    graphs::{draw_optimumless_run_graphs, draw_run_with_optimum_graphs, GraphDescriptor},
     selection::{Selection, TournamentReplacement},
     stats::{
         ConfigStats, ConfigStatsWithOptimum, OptimumDisabiguity, OptimumlessConfigStats,
@@ -93,6 +94,22 @@ impl<T: AlgoDescriptor> ConfigKey<T> {
     }
 }
 
+impl<T: AlgoDescriptor> std::fmt::Display for ConfigKey<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}-{}/{}/crossover={}/mutation={}/{}/{}",
+            self.algo_type.name(),
+            self.algo_type.args().unwrap_or_default(),
+            self.population_size,
+            self.apply_crossover,
+            self.apply_mutation,
+            self.selection_name(),
+            self.tournament_replacement(),
+        )
+    }
+}
+
 pub async fn create_config_writer() -> io::Result<CSVFile> {
     tokio::fs::create_dir_all("data").await?;
     let file = tokio::fs::File::create("data/stats.csv").await?;
@@ -100,60 +117,62 @@ pub async fn create_config_writer() -> io::Result<CSVFile> {
         .buffer_capacity(256 * 1024)
         .create_writer(file);
 
-    writer.write_record([
-        "algo_name",
-        "algo_args",
-        "population_size",
-        "apply_crossover",
-        "apply_mutation",
-        "selection_method",
-        "tournament_replacement",
-        "selection_prob",
-        "success_percent",
-        "min_iteration_count",
-        "max_iteration_count",
-        "avg_iteration_count",
-        "iteration_count_std_dev",
-        "min_min_selection_intensity_idx",
-        "min_min_selection_intensity",
-        "max_max_selection_intensity_idx",
-        "max_max_selection_intensity",
-        "avg_min_selection_intensity",
-        "avg_max_selection_intensity",
-        "avg_selection_intensity",
-        "min_selection_intensity_std_dev",
-        "max_selection_intensity_std_dev",
-        "avg_selection_intensity_std_dev",
-        "min_early_growth_rate",
-        "max_early_growth_rate",
-        "avg_early_growth_rate",
-        "min_late_growth_rate",
-        "max_late_growth_rate",
-        "avg_late_growth_rate",
-        "min_avg_growth_rate",
-        "max_avg_growth_rate",
-        "avg_avg_growth_rate",
-        "min_min_rr_idx",
-        "min_min_rr",
-        "max_max_rr_idx",
-        "max_max_rr",
-        "avg_min_rr",
-        "avg_max_rr",
-        "avg_avg_rr",
-        "min_rr_std_dev",
-        "max_rr_std_dev",
-        "avg_rr_std_dev",
-        "min_min_theta_idx",
-        "min_min_theta",
-        "max_max_theta_idx",
-        "max_max_theta",
-        "avg_min_theta",
-        "avg_max_theta",
-        "avg_avg_theta",
-        "min_theta_std_dev",
-        "max_theta_std_dev",
-        "avg_theta_std_dev",
-    ]).await?;
+    writer
+        .write_record([
+            "algo_name",
+            "algo_args",
+            "population_size",
+            "apply_crossover",
+            "apply_mutation",
+            "selection_method",
+            "tournament_replacement",
+            "selection_prob",
+            "success_percent",
+            "min_iteration_count",
+            "max_iteration_count",
+            "avg_iteration_count",
+            "iteration_count_std_dev",
+            "min_min_selection_intensity_idx",
+            "min_min_selection_intensity",
+            "max_max_selection_intensity_idx",
+            "max_max_selection_intensity",
+            "avg_min_selection_intensity",
+            "avg_max_selection_intensity",
+            "avg_selection_intensity",
+            "min_selection_intensity_std_dev",
+            "max_selection_intensity_std_dev",
+            "avg_selection_intensity_std_dev",
+            "min_early_growth_rate",
+            "max_early_growth_rate",
+            "avg_early_growth_rate",
+            "min_late_growth_rate",
+            "max_late_growth_rate",
+            "avg_late_growth_rate",
+            "min_avg_growth_rate",
+            "max_avg_growth_rate",
+            "avg_avg_growth_rate",
+            "min_min_rr_idx",
+            "min_min_rr",
+            "max_max_rr_idx",
+            "max_max_rr",
+            "avg_min_rr",
+            "avg_max_rr",
+            "avg_avg_rr",
+            "min_rr_std_dev",
+            "max_rr_std_dev",
+            "avg_rr_std_dev",
+            "min_min_theta_idx",
+            "min_min_theta",
+            "max_max_theta_idx",
+            "max_max_theta",
+            "avg_min_theta",
+            "avg_max_theta",
+            "avg_avg_theta",
+            "min_theta_std_dev",
+            "max_theta_std_dev",
+            "avg_theta_std_dev",
+        ])
+        .await?;
 
     Ok(writer)
 }
@@ -176,132 +195,134 @@ async fn append_config_with_optimum<T: AlgoDescriptor>(
     key: ConfigKey<T>,
     stats: &ConfigStatsWithOptimum,
 ) -> io::Result<()> {
-    writer.write_record([
-        key.algo_type.name(),
-        &key.algo_type.args().unwrap_or_default(),
-        &key.population_size.to_string(),
-        &key.apply_crossover.to_string(),
-        &key.apply_mutation.to_string(),
-        key.selection_name(),
-        key.tournament_replacement(),
-        &key.selection_prob(),
-        &stats.success_percent.to_string(),
-        &stats
-            .min_iteration_count
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .max_iteration_count
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .avg_iteration_count
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .iteration_count_std_dev
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats.min_min_selection_intensity.0.to_string(),
-        &stats.min_min_selection_intensity.1.to_string(),
-        &stats.max_max_selection_intensity.0.to_string(),
-        &stats.max_max_selection_intensity.1.to_string(),
-        &stats.avg_min_selection_intensity.to_string(),
-        &stats.avg_max_selection_intensity.to_string(),
-        &stats.avg_selection_intensity.to_string(),
-        &stats.min_selection_intensity_std_dev.to_string(),
-        &stats.max_selection_intensity_std_dev.to_string(),
-        &stats.avg_selection_intensity_std_dev.to_string(),
-        &stats.min_early_growth_rate.to_string(),
-        &stats.max_early_growth_rate.to_string(),
-        &stats.avg_early_growth_rate.to_string(),
-        &stats
-            .min_late_growth_rate
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .max_late_growth_rate
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .avg_late_growth_rate
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats.min_avg_growth_rate.to_string(),
-        &stats.max_avg_growth_rate.to_string(),
-        &stats.avg_avg_growth_rate.to_string(),
-        &stats
-            .min_min_rr
-            .map(|v| v.0.to_string())
-            .unwrap_or_default(),
-        &stats
-            .min_min_rr
-            .map(|v| v.1.to_string())
-            .unwrap_or_default(),
-        &stats
-            .max_max_rr
-            .map(|v| v.0.to_string())
-            .unwrap_or_default(),
-        &stats
-            .max_max_rr
-            .map(|v| v.1.to_string())
-            .unwrap_or_default(),
-        &stats.avg_min_rr.map(|v| v.to_string()).unwrap_or_default(),
-        &stats.avg_max_rr.map(|v| v.to_string()).unwrap_or_default(),
-        &stats.avg_avg_rr.map(|v| v.to_string()).unwrap_or_default(),
-        &stats
-            .min_rr_std_dev
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .max_rr_std_dev
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .avg_rr_std_dev
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .min_min_theta
-            .map(|v| v.0.to_string())
-            .unwrap_or_default(),
-        &stats
-            .min_min_theta
-            .map(|v| v.1.to_string())
-            .unwrap_or_default(),
-        &stats
-            .max_max_theta
-            .map(|v| v.0.to_string())
-            .unwrap_or_default(),
-        &stats
-            .max_max_theta
-            .map(|v| v.1.to_string())
-            .unwrap_or_default(),
-        &stats
-            .avg_min_theta
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .avg_max_theta
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .avg_avg_theta
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .min_theta_std_dev
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .max_theta_std_dev
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .avg_theta_std_dev
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-    ]).await?;
+    writer
+        .write_record([
+            key.algo_type.name(),
+            &key.algo_type.args().unwrap_or_default(),
+            &key.population_size.to_string(),
+            &key.apply_crossover.to_string(),
+            &key.apply_mutation.to_string(),
+            key.selection_name(),
+            key.tournament_replacement(),
+            &key.selection_prob(),
+            &stats.success_percent.to_string(),
+            &stats
+                .min_iteration_count
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .max_iteration_count
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .avg_iteration_count
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .iteration_count_std_dev
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats.min_min_selection_intensity.0.to_string(),
+            &stats.min_min_selection_intensity.1.to_string(),
+            &stats.max_max_selection_intensity.0.to_string(),
+            &stats.max_max_selection_intensity.1.to_string(),
+            &stats.avg_min_selection_intensity.to_string(),
+            &stats.avg_max_selection_intensity.to_string(),
+            &stats.avg_selection_intensity.to_string(),
+            &stats.min_selection_intensity_std_dev.to_string(),
+            &stats.max_selection_intensity_std_dev.to_string(),
+            &stats.avg_selection_intensity_std_dev.to_string(),
+            &stats.min_early_growth_rate.to_string(),
+            &stats.max_early_growth_rate.to_string(),
+            &stats.avg_early_growth_rate.to_string(),
+            &stats
+                .min_late_growth_rate
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .max_late_growth_rate
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .avg_late_growth_rate
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats.min_avg_growth_rate.to_string(),
+            &stats.max_avg_growth_rate.to_string(),
+            &stats.avg_avg_growth_rate.to_string(),
+            &stats
+                .min_min_rr
+                .map(|v| v.0.to_string())
+                .unwrap_or_default(),
+            &stats
+                .min_min_rr
+                .map(|v| v.1.to_string())
+                .unwrap_or_default(),
+            &stats
+                .max_max_rr
+                .map(|v| v.0.to_string())
+                .unwrap_or_default(),
+            &stats
+                .max_max_rr
+                .map(|v| v.1.to_string())
+                .unwrap_or_default(),
+            &stats.avg_min_rr.map(|v| v.to_string()).unwrap_or_default(),
+            &stats.avg_max_rr.map(|v| v.to_string()).unwrap_or_default(),
+            &stats.avg_avg_rr.map(|v| v.to_string()).unwrap_or_default(),
+            &stats
+                .min_rr_std_dev
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .max_rr_std_dev
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .avg_rr_std_dev
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .min_min_theta
+                .map(|v| v.0.to_string())
+                .unwrap_or_default(),
+            &stats
+                .min_min_theta
+                .map(|v| v.1.to_string())
+                .unwrap_or_default(),
+            &stats
+                .max_max_theta
+                .map(|v| v.0.to_string())
+                .unwrap_or_default(),
+            &stats
+                .max_max_theta
+                .map(|v| v.1.to_string())
+                .unwrap_or_default(),
+            &stats
+                .avg_min_theta
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .avg_max_theta
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .avg_avg_theta
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .min_theta_std_dev
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .max_theta_std_dev
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .avg_theta_std_dev
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        ])
+        .await?;
 
     Ok(())
 }
@@ -311,149 +332,152 @@ async fn append_config_optimumless<T: AlgoDescriptor>(
     key: ConfigKey<T>,
     stats: &OptimumlessConfigStats,
 ) -> io::Result<()> {
-    writer.write_record([
-        key.algo_type.name(),
-        &key.algo_type.args().unwrap_or_default(),
-        &key.population_size.to_string(),
-        &key.apply_crossover.to_string(),
-        &key.apply_mutation.to_string(),
-        key.selection_name(),
-        key.tournament_replacement(),
-        &key.selection_prob(),
-        &stats.success_percent.to_string(),
-        &stats
-            .min_iteration_count
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .max_iteration_count
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .avg_iteration_count
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .iteration_count_std_dev
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        &stats
-            .min_min_rr
-            .map(|v| v.0.to_string())
-            .unwrap_or_default(),
-        &stats
-            .min_min_rr
-            .map(|v| v.1.to_string())
-            .unwrap_or_default(),
-        &stats
-            .max_max_rr
-            .map(|v| v.0.to_string())
-            .unwrap_or_default(),
-        &stats
-            .max_max_rr
-            .map(|v| v.1.to_string())
-            .unwrap_or_default(),
-        &stats.avg_min_rr.map(|v| v.to_string()).unwrap_or_default(),
-        &stats.avg_max_rr.map(|v| v.to_string()).unwrap_or_default(),
-        &stats.avg_avg_rr.map(|v| v.to_string()).unwrap_or_default(),
-        &stats
-            .min_rr_std_dev
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .max_rr_std_dev
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .avg_rr_std_dev
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .min_min_theta
-            .map(|v| v.0.to_string())
-            .unwrap_or_default(),
-        &stats
-            .min_min_theta
-            .map(|v| v.1.to_string())
-            .unwrap_or_default(),
-        &stats
-            .max_max_theta
-            .map(|v| v.0.to_string())
-            .unwrap_or_default(),
-        &stats
-            .max_max_theta
-            .map(|v| v.1.to_string())
-            .unwrap_or_default(),
-        &stats
-            .avg_min_theta
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .avg_max_theta
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .avg_avg_theta
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .min_theta_std_dev
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .max_theta_std_dev
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        &stats
-            .avg_theta_std_dev
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-    ]).await?;
+    writer
+        .write_record([
+            key.algo_type.name(),
+            &key.algo_type.args().unwrap_or_default(),
+            &key.population_size.to_string(),
+            &key.apply_crossover.to_string(),
+            &key.apply_mutation.to_string(),
+            key.selection_name(),
+            key.tournament_replacement(),
+            &key.selection_prob(),
+            &stats.success_percent.to_string(),
+            &stats
+                .min_iteration_count
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .max_iteration_count
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .avg_iteration_count
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .iteration_count_std_dev
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            &stats
+                .min_min_rr
+                .map(|v| v.0.to_string())
+                .unwrap_or_default(),
+            &stats
+                .min_min_rr
+                .map(|v| v.1.to_string())
+                .unwrap_or_default(),
+            &stats
+                .max_max_rr
+                .map(|v| v.0.to_string())
+                .unwrap_or_default(),
+            &stats
+                .max_max_rr
+                .map(|v| v.1.to_string())
+                .unwrap_or_default(),
+            &stats.avg_min_rr.map(|v| v.to_string()).unwrap_or_default(),
+            &stats.avg_max_rr.map(|v| v.to_string()).unwrap_or_default(),
+            &stats.avg_avg_rr.map(|v| v.to_string()).unwrap_or_default(),
+            &stats
+                .min_rr_std_dev
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .max_rr_std_dev
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .avg_rr_std_dev
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .min_min_theta
+                .map(|v| v.0.to_string())
+                .unwrap_or_default(),
+            &stats
+                .min_min_theta
+                .map(|v| v.1.to_string())
+                .unwrap_or_default(),
+            &stats
+                .max_max_theta
+                .map(|v| v.0.to_string())
+                .unwrap_or_default(),
+            &stats
+                .max_max_theta
+                .map(|v| v.1.to_string())
+                .unwrap_or_default(),
+            &stats
+                .avg_min_theta
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .avg_max_theta
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .avg_avg_theta
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .min_theta_std_dev
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .max_theta_std_dev
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            &stats
+                .avg_theta_std_dev
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        ])
+        .await?;
 
     Ok(())
 }
 
-pub async fn write_stats<T: AlgoDescriptor>(
+pub async fn write_stats<T: AlgoDescriptor + GraphDescriptor + Clone>(
     file_limiter: &tokio::sync::Semaphore,
     key: ConfigKey<T>,
     stats: &ConfigStats,
-) -> io::Result<()> {
+) -> eyre::Result<()> {
     use OptimumDisabiguity::*;
     let path = key.to_path();
 
     match stats {
-        WithOptimum(stats) => write_with_optimum(file_limiter, &path, stats).await,
-        Optimumless(stats) => write_optimumless(file_limiter, &path, stats).await,
-    }?;
+        WithOptimum(stats) => write_with_optimum(key.algo_type, file_limiter, &path, stats).await?,
+        Optimumless(stats) => write_optimumless(key.algo_type, file_limiter, &path, stats).await?,
+    };
     println!("Wrote stats for {:?}", path);
 
     Ok(())
 }
 
 async fn write_optimumless(
+    descriptor: impl GraphDescriptor + Clone,
     file_limiter: &tokio::sync::Semaphore,
     path: &Path,
     stats: &OptimumlessConfigStats,
-) -> io::Result<()> {
+) -> eyre::Result<()> {
     tokio::fs::create_dir_all(path).await?;
 
     let csv_write = async move {
@@ -499,23 +523,34 @@ async fn write_optimumless(
                 .await?;
         }
 
-        writer.flush().await
-    };
+        writer.flush().await?;
+        drop(writer);
+        tokio::task::yield_now().await;
 
-    // let runs_write = try_join_all(
-    //     stats
-    //         .runs
-    //         .iter()
-    //         .zip(1..)
-    //         .map(|(run, n)| write_run_optimumless(file_limiter, path.join(format!("{n}")), run)),
-    // );
+        eyre::Result::<()>::Ok(())
+    };
 
     let runs_write = async {
         for (run, n) in stats.runs.iter().zip(1..) {
-            write_run_optimumless(file_limiter, path.join(format!("{n}")), run).await?;
+            let path = path.join(format!("{n}"));
+            tokio::fs::create_dir_all(&path).await?;
+            if n <= 5 {
+                try_join!(
+                    draw_optimumless_run_graphs(file_limiter, descriptor.clone(), &path, run),
+                    write_optimumless_run(file_limiter, &path, run),
+                    write_population(
+                        file_limiter,
+                        &path,
+                        &run.starting_population,
+                        &run.final_population,
+                    )
+                )?;
+            } else {
+                write_optimumless_run(file_limiter, &path, run).await?;
+            }
         }
 
-        Ok(())
+        eyre::Result::<()>::Ok(())
     };
 
     try_join(csv_write, runs_write).await?;
@@ -524,10 +559,11 @@ async fn write_optimumless(
 }
 
 async fn write_with_optimum(
+    descriptor: impl GraphDescriptor + Clone,
     file_limiter: &tokio::sync::Semaphore,
     path: &Path,
     stats: &ConfigStatsWithOptimum,
-) -> io::Result<()> {
+) -> eyre::Result<()> {
     tokio::fs::create_dir_all(path).await?;
 
     let csv_write = async {
@@ -608,20 +644,31 @@ async fn write_with_optimum(
                 .await?;
         }
 
-        writer.flush().await
-    };
+        writer.flush().await?;
+        drop(writer);
+        tokio::task::yield_now().await;
 
-    // let runs_write = try_join_all(
-    //     stats
-    //         .runs
-    //         .iter()
-    //         .zip(1..)
-    //         .map(|(run, n)| write_run_with_optimum(file_limiter, path.join(format!("{n}")), run)),
-    // );
+        eyre::Result::<()>::Ok(())
+    };
 
     let runs_write = async {
         for (run, n) in stats.runs.iter().zip(1..) {
-            write_run_with_optimum(file_limiter, path.join(format!("{n}")), run).await?;
+            let path = path.join(format!("{n}"));
+            tokio::fs::create_dir_all(&path).await?;
+            if n <= 5 {
+                try_join!(
+                    draw_run_with_optimum_graphs(file_limiter, descriptor.clone(), &path, run),
+                    write_run_with_optimum(file_limiter, &path, run),
+                    write_population(
+                        file_limiter,
+                        &path,
+                        &run.starting_population,
+                        &run.final_population
+                    ),
+                )?;
+            } else {
+                write_run_with_optimum(file_limiter, &path, run).await?;
+            }
         }
 
         Ok(())
@@ -634,153 +681,104 @@ async fn write_with_optimum(
 
 async fn write_run_with_optimum(
     file_limiter: &tokio::sync::Semaphore,
-    path: PathBuf,
+    path: &Path,
     run: &RunStatsWithOptimum,
-) -> io::Result<()> {
-    tokio::fs::create_dir_all(&path).await?;
-
-    let csv_write = async {
-        let _permit = file_limiter.acquire().await.unwrap();
-        let file = tokio::fs::File::create(path.join("iterations.csv")).await?;
-        let mut writer = csv_async::AsyncWriter::from_writer(file);
-        writer
-            .write_record([
-                "selection_intensity",
-                "growth_rate",
-                "optimal_specimen_count",
-                "avg_fitness",
-                "rr",
-                "theta",
-                "selection_diff",
-            ])
-            .await?;
-
-        for iteration in &run.iterations {
-            writer
-                .write_record([
-                    iteration.selection_intensity.to_string(),
-                    iteration.growth_rate.to_string(),
-                    iteration.optimal_specimen_count.to_string(),
-                    iteration.avg_fitness.to_string(),
-                    iteration.rr.to_string(),
-                    iteration.theta.to_string(),
-                    iteration.selection_diff.to_string(),
-                ])
-                .await?;
-        }
-
-        writer.flush().await
-    };
-
-    // let iterations_write = try_join_all(
-    //     run.starting_population
-    //         .iter()
-    //         .enumerate()
-    //         .map(|(idx, population)| {
-    //             write_iteration_population(file_limiter, path.join(format!("{idx}")), population.iter())
-    //         })
-    //         .chain(std::iter::once(write_iteration_population(
-    //             file_limiter,
-    //             path.join("final"),
-    //             run.final_population.iter(),
-    //         ))),
-    // );
-
-    let iterations_write = async {
-        for (idx, population) in run.starting_population.iter().enumerate() {
-            write_iteration_population(
-                file_limiter,
-                path.join(format!("{idx}")),
-                population.iter(),
-            )
-            .await?;
-        }
-
-        write_iteration_population(
-            file_limiter,
-            path.join("final"),
-            run.final_population.iter(),
-        )
+) -> eyre::Result<()> {
+    let _permit = file_limiter.acquire().await.unwrap();
+    let file = tokio::fs::File::create(path.join("iterations.csv")).await?;
+    let mut writer = csv_async::AsyncWriter::from_writer(file);
+    writer
+        .write_record([
+            "selection_intensity",
+            "growth_rate",
+            "optimal_specimen_count",
+            "avg_fitness",
+            "best_fitness",
+            "fitness_std_dev",
+            "rr",
+            "theta",
+            "selection_diff",
+        ])
         .await?;
 
-        Ok(())
-    };
+    for iteration in &run.iterations {
+        writer
+            .write_record([
+                iteration.selection_intensity.to_string(),
+                iteration.growth_rate.to_string(),
+                iteration.optimal_specimen_count.to_string(),
+                iteration.avg_fitness.to_string(),
+                iteration.best_fitness.to_string(),
+                iteration.fitness_std_dev.to_string(),
+                iteration.rr.to_string(),
+                iteration.theta.to_string(),
+                iteration.selection_diff.to_string(),
+            ])
+            .await?;
+    }
 
-    try_join(csv_write, iterations_write).await?;
+    writer.flush().await?;
+    drop(writer);
+    tokio::task::yield_now().await;
 
     Ok(())
 }
 
-async fn write_run_optimumless(
+async fn write_population(
     file_limiter: &tokio::sync::Semaphore,
-    path: PathBuf,
+    path: &Path,
+    starting_population: &[PopulationStats],
+    final_population: &PopulationStats,
+) -> eyre::Result<()> {
+    for (idx, population) in starting_population.iter().enumerate() {
+        write_iteration_population(file_limiter, &path.join(format!("{idx}")), population).await?;
+    }
+    write_iteration_population(file_limiter, &path.join("final"), final_population).await?;
+    Ok(())
+}
+
+async fn write_optimumless_run(
+    file_limiter: &tokio::sync::Semaphore,
+    path: &Path,
     run: &OptimumlessRunStats,
-) -> io::Result<()> {
-    tokio::fs::create_dir_all(&path).await?;
+) -> eyre::Result<()> {
+    let _permit = file_limiter.acquire().await.unwrap();
+    let file = tokio::fs::File::create(path.join("iterations.csv")).await?;
+    let mut writer = csv_async::AsyncWriter::from_writer(file);
 
-    let csv_write = async {
-        let _permit = file_limiter.acquire().await.unwrap();
-        let file = tokio::fs::File::create(path.join("iterations.csv")).await?;
-        let mut writer = csv_async::AsyncWriter::from_writer(file);
-
-        writer.write_record(["avg_fitness", "rr", "theta"]).await?;
-
-        for iteration in &run.iterations {
-            writer
-                .write_record([
-                    iteration.avg_fitness.to_string(),
-                    iteration.rr.to_string(),
-                    iteration.theta.to_string(),
-                ])
-                .await?;
-        }
-
-        writer.flush().await
-    };
-
-    // let iterations_write = try_join_all(
-    //     run.starting_population
-    //         .iter()
-    //         .enumerate()
-    //         .map(|(idx, population)| {
-    //             write_iteration_population(file_limiter, path.join(format!("{idx}")), population.iter())
-    //         })
-    //         .chain(std::iter::once(write_iteration_population(
-    //             file_limiter,
-    //             path.join("final"),
-    //             run.final_population.iter(),
-    //         ))),
-    // );
-
-    let iterations_write = async {
-        for (idx, population) in run.starting_population.iter().enumerate() {
-            write_iteration_population(
-                file_limiter,
-                path.join(format!("{idx}")),
-                population.iter(),
-            )
-            .await?;
-        }
-
-        write_iteration_population(
-            file_limiter,
-            path.join("final"),
-            run.final_population.iter(),
-        )
+    writer
+        .write_record([
+            "avg_fitness",
+            "best_fitness",
+            "fitness_std_dev",
+            "rr",
+            "theta",
+        ])
         .await?;
 
-        Ok(())
-    };
+    for iteration in &run.iterations {
+        writer
+            .write_record([
+                iteration.avg_fitness.to_string(),
+                iteration.best_fitness.to_string(),
+                iteration.fitness_std_dev.to_string(),
+                iteration.rr.to_string(),
+                iteration.theta.to_string(),
+            ])
+            .await?;
+    }
 
-    try_join(csv_write, iterations_write).await?;
+    writer.flush().await?;
+    drop(writer);
+    tokio::task::yield_now().await;
 
     Ok(())
 }
 
 async fn write_iteration_population<'a>(
     file_limiter: &tokio::sync::Semaphore,
-    path: PathBuf,
-    population: impl IntoIterator<Item = &'a PopulationStats>,
+    path: &Path,
+    population: &PopulationStats,
 ) -> io::Result<()> {
     tokio::fs::create_dir_all(&path).await?;
 
@@ -788,22 +786,39 @@ async fn write_iteration_population<'a>(
     let file = tokio::fs::File::create(path.join("population.csv")).await?;
     let mut writer = csv_async::AsyncWriter::from_writer(file);
 
-    writer
-        .write_record(["fitness", "phenotype", "ones_count"])
-        .await?;
+    match &population.phenotype {
+        Some(phenotypes) => {
+            writer
+                .write_record(["fitness", "phenotype", "ones_count"])
+                .await?;
 
-    for population in population {
-        writer
-            .write_record([
-                population.fitness.to_string(),
-                population
-                    .phenotype
-                    .map(|v| v.to_string())
-                    .unwrap_or_default(),
-                population.ones_count.to_string(),
-            ])
-            .await?;
+            for i in 0..population.fitness.len() {
+                writer
+                    .write_record([
+                        population.fitness[i].to_string(),
+                        phenotypes[i].to_string(),
+                        population.ones_count[i].to_string(),
+                    ])
+                    .await?;
+            }
+        }
+        None => {
+            writer.write_record(["fitness", "ones_count"]).await?;
+
+            for i in 0..population.fitness.len() {
+                writer
+                    .write_record([
+                        population.fitness[i].to_string(),
+                        population.ones_count[i].to_string(),
+                    ])
+                    .await?;
+            }
+        }
     }
 
-    writer.flush().await
+    writer.flush().await?;
+    drop(writer);
+    tokio::task::yield_now().await;
+
+    Ok(())
 }

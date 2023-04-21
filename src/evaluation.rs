@@ -38,6 +38,8 @@ pub trait EvaluateFamily: GenFamily {
     fn decode_phenotype(genome: Genome<{ Self::N }>, algo: Self::AlgoType) -> Option<N64>
     where
         [(); bitvec::mem::elts::<u16>(Self::N)]:;
+
+    fn has_phenotype() -> bool;
 }
 
 impl EvaluateFamily for G10 {
@@ -55,6 +57,10 @@ impl EvaluateFamily for G10 {
     {
         let (decode_genome, decode_phenotype, _) = phenotype_fns(algo, encoding);
         Some(decode_phenotype(decode_genome(genome)))
+    }
+
+    fn has_phenotype() -> bool {
+        true
     }
 }
 
@@ -74,6 +80,10 @@ impl EvaluateFamily for G100 {
         [(); bitvec::mem::elts::<u16>(Self::N)]:,
     {
         None
+    }
+
+    fn has_phenotype() -> bool {
+        false
     }
 }
 
@@ -241,6 +251,7 @@ pub mod pow1 {
         Genome::new(bitarr![u16, Lsb0; 1; 10])
     }
 
+    #[allow(dead_code)]
     pub fn encode_binary(pheonotype: f64) -> Genome<10> {
         let pheonotype = (pheonotype * 100.0) as u16;
         Genome::new(BitArray::new([pheonotype]))
@@ -248,6 +259,7 @@ pub mod pow1 {
 
     pub fn decode_binary(genome: Genome<10>) -> N64 {
         let [pheonotype] = genome.into_inner();
+        let pheonotype = pheonotype & 0b1111111111;
         N64::from_u16(pheonotype).unwrap() / 100.0
     }
 
@@ -295,6 +307,7 @@ pub mod pow2 {
         Genome::new(bitarr![u16, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1, 1, 0])
     }
 
+    #[allow(dead_code)]
     pub fn encode_binary(pheonotype: f64) -> Genome<10> {
         let pheonotype = ((pheonotype * 100.0) as i16 + 511) as u16;
         Genome::new(BitArray::new([pheonotype]))
@@ -306,7 +319,7 @@ pub mod pow2 {
     }
 
     pub fn fitness(pheonotype: N64) -> N64 {
-        let _512 = N64::from(512.0);
+        let _512 = N64::from(5.12);
         (_512 - pheonotype) * (_512 + pheonotype)
     }
 

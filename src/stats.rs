@@ -20,6 +20,8 @@ pub struct IterationStats {
     pub growth_rate: N64,
     pub optimal_specimen_count: usize,
     pub avg_fitness: N64,
+    pub best_fitness: N64,
+    pub fitness_std_dev: N64,
     pub rr: N64,
     pub theta: N64,
     pub selection_diff: N64,
@@ -28,23 +30,25 @@ pub struct IterationStats {
 #[derive(Debug, Clone, Copy)]
 pub struct OptimumlessIterationStats {
     pub avg_fitness: N64,
+    pub best_fitness: N64,
+    pub fitness_std_dev: N64,
     pub rr: N64,
     pub theta: N64,
     // selection_diff: N64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PopulationStats {
-    pub fitness: N64,
-    pub phenotype: Option<N64>,
-    pub ones_count: usize,
+    pub fitness: Vec<N64>,
+    pub ones_count: Vec<usize>,
+    pub phenotype: Option<Vec<N64>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct RunStatsWithOptimum {
     pub iterations: Vec<IterationStats>,
-    pub starting_population: ArrayVec<Vec<PopulationStats>, 5>,
-    pub final_population: Vec<PopulationStats>,
+    pub starting_population: ArrayVec<PopulationStats, 5>,
+    pub final_population: PopulationStats,
 
     // pub populations: Vec<Vec<PopulationStats>>,
     pub best_fitness: N64,
@@ -73,8 +77,8 @@ pub struct RunStatsWithOptimum {
 #[derive(Debug, Clone)]
 pub struct OptimumlessRunStats {
     pub iterations: Vec<OptimumlessIterationStats>,
-    pub starting_population: ArrayVec<Vec<PopulationStats>, 5>,
-    pub final_population: Vec<PopulationStats>,
+    pub starting_population: ArrayVec<PopulationStats, 5>,
+    pub final_population: PopulationStats,
 
     // best_fitness: N64,
     // avg_fitness: N64,
@@ -506,7 +510,7 @@ where
     optimal_specimen: Genome<{ F::N }>,
     iterations: Vec<IterationStats>,
     prev_iteration_optimal_specimens: usize,
-    populations: ArrayVec<Vec<PopulationStats>, 5>,
+    populations: ArrayVec<PopulationStats, 5>,
 }
 
 impl<F: SuccessFamily + EvaluateFamily> StateEncoderWithOptimum<'_, F>
@@ -558,6 +562,12 @@ where
             growth_rate,
             optimal_specimen_count,
             avg_fitness,
+            best_fitness: population
+                .iter()
+                .map(|g| g.fitness)
+                .max()
+                .expect("At least one iteration to be recorded"),
+            fitness_std_dev: std_dev,
             rr: unique_specimens_selected / population_size,
             theta: (population_size - unique_specimens_selected) / population_size,
         });
@@ -588,6 +598,25 @@ where
         final_population: &[EvaluatedGenome<{ F::N }>],
         success: bool,
     ) -> RunStatsWithOptimum {
+        let final_population_stats = PopulationStats {
+            fitness: final_population.iter().map(|g| g.fitness).collect(),
+            ones_count: final_population
+                .iter()
+                .map(|g| g.genome.count_ones())
+                .collect(),
+            phenotype: if F::has_phenotype() {
+                Some(
+                    final_population
+                        .iter()
+                        .map(|g| F::decode_phenotype(g.genome, self.config.ty)
+                        .expect("if EvaluateFamily::has_phenotype is true, every possible genome has associated phenotype"))
+                        .collect(),
+                )
+            } else {
+                None
+            },
+        };
+
         RunStatsWithOptimum {
             best_fitness: final_population
                 .iter()
@@ -625,14 +654,7 @@ where
 
             iterations: self.iterations,
             starting_population: self.populations,
-            final_population: final_population
-                .iter()
-                .map(|g| PopulationStats {
-                    fitness: g.fitness,
-                    phenotype: F::decode_phenotype(g.genome, self.config.ty),
-                    ones_count: g.genome.count_ones(),
-                })
-                .collect(),
+            final_population: final_population_stats,
         }
     }
 
@@ -640,16 +662,19 @@ where
         if self.populations.is_full() {
             return;
         }
-        self.populations.push(
-            population
-                .iter()
-                .map(|g| PopulationStats {
-                    fitness: g.fitness,
-                    phenotype: F::decode_phenotype(g.genome, self.config.ty),
-                    ones_count: g.genome.count_ones(),
-                })
-                .collect(),
-        );
+        self.populations.push(PopulationStats {
+            fitness: population.iter().map(|g| g.fitness).collect(),
+            ones_count: population.iter().map(|g| g.genome.count_ones()).collect(),
+            phenotype: if F::has_phenotype() {
+                Some(
+                    population
+                        .iter()
+                        .map(|g| F::decode_phenotype(g.genome, self.config.ty)
+                        .expect("if EvaluateFamily::has_phenotype is true, every possible genome has associated phenotype"))
+                        .collect(),
+                )
+            } else { None },
+        });
     }
 }
 
@@ -766,7 +791,7 @@ impl SuccessFamily for G100 {
 
 pub struct OptimumlessStateEncoder {
     iterations: Vec<OptimumlessIterationStats>,
-    populations: ArrayVec<Vec<PopulationStats>, 5>,
+    populations: ArrayVec<PopulationStats, 5>,
 }
 
 impl OptimumlessStateEncoder {
@@ -786,6 +811,12 @@ impl OptimumlessStateEncoder {
         self.iterations.push(OptimumlessIterationStats {
             // selection_diff: avg_fitness - pre_selection_fitness,
             avg_fitness,
+            best_fitness: population
+                .iter()
+                .map(|genome| genome.fitness)
+                .max()
+                .expect("At least one iteration to be recorded"),
+            fitness_std_dev: std_dev_by(population, |genome| genome.fitness),
             rr: unique_specimens_selected / population_size,
             theta: (population_size - unique_specimens_selected) / population_size,
         });
@@ -799,18 +830,11 @@ impl OptimumlessStateEncoder {
         if self.populations.is_full() {
             return;
         }
-        self.populations.push(
-            population
-                .iter()
-                .map(|genome| PopulationStats {
-                    fitness: genome.fitness,
-                    // This is fine just because the only optimumless algo happens to not have
-                    // phenotype.
-                    phenotype: None,
-                    ones_count: genome.genome.count_ones(),
-                })
-                .collect(),
-        );
+        self.populations.push(PopulationStats {
+            fitness: population.iter().map(|g| g.fitness).collect(),
+            ones_count: population.iter().map(|g| g.genome.count_ones()).collect(),
+            phenotype: None,
+        });
     }
 
     pub fn finish_converged<const N: usize>(
@@ -858,16 +882,11 @@ impl OptimumlessStateEncoder {
 
             iterations: self.iterations,
             starting_population: self.populations,
-            final_population: final_population
-                .iter()
-                .map(|g| PopulationStats {
-                    fitness: g.fitness,
-                    // This is fine just because the only optimumless algo happens to not have
-                    // phenotype.
-                    phenotype: None,
-                    ones_count: g.genome.count_ones(),
-                })
-                .collect(),
+            final_population: PopulationStats {
+                fitness: final_population.iter().map(|g| g.fitness).collect(),
+                ones_count: final_population.iter().map(|g| g.genome.count_ones()).collect(),
+                phenotype: None
+            }, 
         }
     }
 }

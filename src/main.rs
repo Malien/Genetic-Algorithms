@@ -7,10 +7,13 @@ use std::{
 
 use bitvec::{order::Lsb0, slice::BitSlice, BitArr};
 use decorum::{Finite, N64, R64};
+use eyre::WrapErr;
+use graphs::GraphDescriptor;
 use num_traits::{real::Real, FromPrimitive};
 use rand::rngs::StdRng;
 
 mod evaluation;
+mod graphs;
 mod operators;
 mod persistance;
 mod selection;
@@ -21,7 +24,7 @@ use evaluation::{
     EvaluateFamily, GenomeEncoding, PheonotypeAlgo,
 };
 use operators::{crossover, mutation};
-use persistance::{write_stats, ConfigKey, CSVFile};
+use persistance::{write_stats, CSVFile, ConfigKey};
 use selection::{selection, Selection, SelectionResult, TournamentReplacement};
 use stats::{ConfigStats, RunStats, StatEncoder, SuccessFamily};
 
@@ -421,7 +424,7 @@ fn config_permutations_10() -> Vec<AlgoConfig<G10>> {
         algo in [PheonotypeAlgo::Pow1, PheonotypeAlgo::Pow2];
         (encoding, optimal_specimen) in [
             (GenomeEncoding::Binary, optimal_pheonotype_specimen(algo)),
-            (GenomeEncoding::BinaryGray, binary_to_gray(optimal_pheonotype_specimen(algo)))
+            (GenomeEncoding::BinaryGray, binary_to_gray(optimal_pheonotype_specimen(algo))),
         ];
         {
             res.push(AlgoConfig {
@@ -453,7 +456,7 @@ struct ProgramState {
 fn run_config<F: FullFamily>(state: &ProgramState, config: AlgoConfig<F>)
 where
     [(); bitvec::mem::elts::<u16>(F::N)]:,
-    F::AlgoType: Send + Sync + 'static
+    F::AlgoType: GraphDescriptor + Send + Sync + 'static,
 {
     let solved = state.counter.load(std::sync::atomic::Ordering::SeqCst);
     println!(
@@ -479,30 +482,55 @@ where
     let stats = Arc::new(ConfigStats::new(runs));
 
     let mut write_tasks = state.write_tasks.lock().unwrap();
-    write_tasks.spawn_on({
-        let key = config.to_key();
-        let stats = Arc::clone(&stats);
-        let file_limiter = Arc::clone(&state.file_limiter);
-        async move {
-            write_stats(file_limiter.as_ref(), key, stats.as_ref()).await.unwrap();
-        }
-    }, &state.runtime);
+    write_tasks.spawn_on(
+        {
+            let key = config.to_key();
+            let stats = Arc::clone(&stats);
+            let file_limiter = Arc::clone(&state.file_limiter);
+            async move {
+                write_stats(file_limiter.as_ref(), key, stats.as_ref())
+                    .await
+                    .wrap_err_with(|| key)
+                    .unwrap();
+            }
+        },
+        &state.runtime,
+    );
 
-    write_tasks.spawn_on({
-        let stats = Arc::clone(&stats);
-        let key = config.to_key();
-        let config_writer = Arc::clone(&state.config_writer);
-        async move {
-            let mut writer = config_writer.lock().await;
-            append_config(writer.deref_mut(), key, stats.as_ref()).await.unwrap();
-        }
-    }, &state.runtime);
+    write_tasks.spawn_on(
+        {
+            let stats = Arc::clone(&stats);
+            let key = config.to_key();
+            let config_writer = Arc::clone(&state.config_writer);
+            async move {
+                let mut writer = config_writer.lock().await;
+                append_config(writer.deref_mut(), key, stats.as_ref())
+                    .await
+                    .unwrap();
+            }
+        },
+        &state.runtime,
+    );
 }
 
 fn main() {
+    color_eyre::install().unwrap();
+
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let config_10 = config_permutations_10();
     let config_100 = config_permutations_100();
+    // let config_100: Vec<AlgoConfig<G100>> = vec![];
+    // let config_10 = vec![AlgoConfig::<G10> {
+    //     ty: (PheonotypeAlgo::Pow2, GenomeEncoding::Binary),
+    //     population_size: 100,
+    //     apply_crossover: true,
+    //     mutation_rate: Some(0.0005),
+    //     selection: Selection::StochasticTournament {
+    //         prob: 1.0.into(),
+    //         replacement: TournamentReplacement::With,
+    //     },
+    //     optimal_specimen: Some(evaluation::pow2::optimal_specimen()),
+    // }];
     let config_writer = runtime.block_on(create_config_writer()).unwrap();
     let program_state = ProgramState {
         file_limiter: Arc::new(tokio::sync::Semaphore::new(10)),
@@ -510,12 +538,12 @@ fn main() {
         write_tasks: std::sync::Mutex::new(tokio::task::JoinSet::new()),
         counter: AtomicUsize::new(0),
         len: config_10.len() + config_100.len(),
-        runtime: runtime.handle().clone()
+        runtime: runtime.handle().clone(),
     };
+    let thread_pool = rayon::ThreadPoolBuilder::new().build().unwrap();
     println!("Running {} configs", program_state.len);
 
-    #[cfg(feature = "parallel")]
-    rayon::scope(|s| {
+    thread_pool.scope(|s| {
         for config in config_10 {
             let program_state = &program_state;
             s.spawn(move |_| run_config(program_state, config));
@@ -526,21 +554,36 @@ fn main() {
         }
     });
 
-    #[cfg(not(feature = "parallel"))]
-    for config in config_10 {
-        run_config(&program_state, config);
-    }
-    #[cfg(not(feature = "parallel"))]
-    for config in config_100 {
-        run_config(&program_state, config);
-    }
+    // for config in config_10 {
+    //     run_config(&program_state, config);
+    // }
+    // for config in config_100 {
+    //     run_config(&program_state, config);
+    // }
 
     println!("Finished running all configs. Waiting for writes to complete...");
 
     runtime.block_on(async move {
-        let mut config_writer = Arc::try_unwrap(program_state.config_writer).unwrap().into_inner();
-        config_writer.flush().await.unwrap();
-        let mut write_tasks = program_state.write_tasks.into_inner().unwrap();
-        while let Some(_) = write_tasks.join_next().await {}
+        let b = async move {
+            let mut write_tasks = program_state.write_tasks.into_inner().unwrap();
+            while let Some(_) = write_tasks.join_next().await {}
+        };
+        let a = async move {
+            let mut config_writer = wait_for_arc(program_state.config_writer).await.into_inner();
+            config_writer.flush().await.unwrap();
+        };
+        futures::future::join(a, b).await;
     });
+}
+
+async fn wait_for_arc<T>(mut arc: Arc<T>) -> T {
+    loop {
+        match Arc::try_unwrap(arc) {
+            Ok(t) => return t,
+            Err(t) => {
+                arc = t;
+                tokio::task::yield_now().await;
+            }
+        };
+    }
 }
