@@ -3,16 +3,16 @@ use std::path::Path;
 use decorum::N64;
 use futures::try_join;
 use num_traits::real::Real;
+use once_cell::sync::Lazy;
 use plotters::{
     backend::{BitMapBackend, PixelFormat, RGBPixel},
     chart::ChartBuilder,
-    coord::{combinators::IntoLinspace, Shift},
+    coord::{combinators::{IntoLinspace, IntoLogRange}, Shift},
     drawing::IntoDrawingArea,
     series::{Histogram, LineSeries},
     style::{colors, Color, IntoFont},
 };
 use tokio::io::AsyncWriteExt;
-use once_cell::sync::Lazy;
 
 use crate::stats::{OptimumlessRunStats, PopulationStats, RunStatsWithOptimum};
 use crate::{BinaryAlgo, GenomeEncoding, PheonotypeAlgo};
@@ -153,7 +153,7 @@ fn minmax_iter<T: Ord + Copy>(iter: impl IntoIterator<Item = T>) -> Option<(T, T
     Some((min, max))
 }
 
-fn just_plot_numbers(
+fn just_plot_floats(
     name: &str,
     (min, max): (N64, N64),
     iter: impl ExactSizeIterator<Item = N64> + Clone,
@@ -172,6 +172,51 @@ fn just_plot_numbers(
             iter.map(f64::from).enumerate(),
             &colors::RED,
         ))?;
+
+        Ok(())
+    })
+}
+
+fn just_plot_ints(
+    name: &str,
+    (min, max): (usize, usize),
+    iter: impl ExactSizeIterator<Item = usize> + Clone,
+) -> eyre::Result<Vec<u8>> {
+    graph_image(|root| {
+        let mut chart = ChartBuilder::on(&root)
+            .caption(name, ("sans-serif", 50).into_font())
+            .margin(5)
+            .x_label_area_size(30)
+            .y_label_area_size(40)
+            .build_cartesian_2d(0..(iter.len() - 1), min..max + 1)?;
+
+        chart.configure_mesh().draw()?;
+
+        chart.draw_series(LineSeries::new(iter.enumerate(), &colors::RED))?;
+
+        Ok(())
+    })
+}
+
+fn plot_double(
+    (min, max): (N64, N64),
+    (a, a_name): (impl ExactSizeIterator<Item = N64> + Clone, &str),
+    (b, b_name): (impl ExactSizeIterator<Item = N64> + Clone, &str),
+) -> eyre::Result<Vec<u8>> {
+    assert!(a.len() == b.len());
+
+    graph_image(|root| {
+        let mut chart = ChartBuilder::on(&root)
+            .caption(format!("{a_name} and {b_name}"), ("sans-serif", 50).into_font())
+            .margin(5)
+            .x_label_area_size(30)
+            .y_label_area_size(40)
+            .build_cartesian_2d(0..(a.len() - 1), f64::from(min)..f64::from(max))?;
+
+        chart.configure_mesh().draw()?;
+
+        chart.draw_series(LineSeries::new(a.map(f64::from).enumerate(), &colors::RED))?.label(a_name);
+        chart.draw_series(LineSeries::new(b.map(f64::from).enumerate(), &colors::BLUE))?.label(b_name);
 
         Ok(())
     })
@@ -254,7 +299,7 @@ async fn write_file(
 }
 
 macro_rules! write_all {
-    ($file_limiter:expr, $path:expr; $($future:ident),+) => {
+    ($file_limiter:expr, $path:expr; $($future:ident),+ $(,)?) => {
         try_join!(
             $(write_file($file_limiter, $path, $future, concat!(stringify!($future), ".png"))),+
         )
@@ -262,9 +307,8 @@ macro_rules! write_all {
 }
 
 // A separate thread pool for drawing graphs
-static THREAD_POOL: Lazy<rayon::ThreadPool> = Lazy::new(|| {
-    rayon::ThreadPoolBuilder::new().build().unwrap()
-});
+static THREAD_POOL: Lazy<rayon::ThreadPool> =
+    Lazy::new(|| rayon::ThreadPoolBuilder::new().build().unwrap());
 
 pub async fn draw_population_graphs(
     file_limiter: &tokio::sync::Semaphore,
@@ -272,6 +316,8 @@ pub async fn draw_population_graphs(
     path: &Path,
     population: &PopulationStats,
 ) -> eyre::Result<()> {
+    tokio::fs::create_dir_all(&path).await?;
+
     let phenotype_bounds = descriptor.phenotype_bounds();
     let fitness_bounds = descriptor.fitness_bounds();
 
@@ -326,20 +372,34 @@ pub async fn draw_optimumless_run_graphs(
 
     let mut avg_fitness = None;
     let mut best_fitness = None;
+    let mut fitness_std_dev = None;
+    let mut rr_and_theta = None;
+
     THREAD_POOL.scope(|s| {
         s.spawn(|_| {
             let iter = run.iterations.iter().map(|i| i.avg_fitness);
             let Some(bounds) = minmax_iter(iter.clone()) else { return };
-            avg_fitness = Some(just_plot_numbers("Fitness", bounds, iter));
+            avg_fitness = Some(just_plot_floats("Fitness", bounds, iter));
         });
         s.spawn(|_| {
             let iter = run.iterations.iter().map(|i| i.best_fitness);
             let Some(bounds) = minmax_iter(iter.clone()) else { return };
-            best_fitness = Some(just_plot_numbers("Best fitness", bounds, iter));
+            best_fitness = Some(just_plot_floats("Best fitness", bounds, iter));
+        });
+        s.spawn(|_| {
+            let iter = run.iterations.iter().map(|i| i.fitness_std_dev);
+            let Some(bounds) = minmax_iter(iter.clone()) else { return };
+            fitness_std_dev = Some(just_plot_floats("Fitness std dev", bounds, iter));
+        });
+        s.spawn(|_| {
+            let rr = run.iterations.iter().map(|i| i.rr);
+            let theta = run.iterations.iter().map(|i| i.theta);
+            let Some(bounds) = minmax_iter(rr.clone().chain(theta.clone())) else { return };
+            rr_and_theta = Some(plot_double(bounds, (rr, "RR"), (theta, "Theta")));
         });
     });
 
-    write_all!(file_limiter, &path; avg_fitness, best_fitness)?;
+    write_all!(file_limiter, &path; avg_fitness, best_fitness, fitness_std_dev, rr_and_theta)?;
 
     Ok(())
 }
@@ -372,20 +432,75 @@ pub async fn draw_run_with_optimum_graphs(
 
     let mut avg_fitness = None;
     let mut best_fitness = None;
+    let mut selection_intensity = None;
+    let mut selection_diff = None;
+    let mut fitness_std_dev = None;
+    let mut optimal_specimen_count = None;
+    let mut growth_rate = None;
+    let mut rr_and_theta = None;
+    let mut selection_intensity_and_diff = None;
+
     THREAD_POOL.scope(|s| {
         s.spawn(|_| {
             let iter = run.iterations.iter().map(|i| i.avg_fitness);
             let Some(bounds) = minmax_iter(iter.clone()) else { return };
-            avg_fitness = Some(just_plot_numbers("Fitness", bounds, iter));
+            avg_fitness = Some(just_plot_floats("Fitness", bounds, iter));
         });
         s.spawn(|_| {
             let iter = run.iterations.iter().map(|i| i.best_fitness);
             let Some(bounds) = minmax_iter(iter.clone()) else { return };
-            best_fitness = Some(just_plot_numbers("Best fitness", bounds, iter));
+            best_fitness = Some(just_plot_floats("Best fitness", bounds, iter));
+        });
+        s.spawn(|_| {
+            let iter = run.iterations.iter().map(|i| i.selection_intensity);
+            let Some(bounds) = minmax_iter(iter.clone()) else { return };
+            selection_intensity = Some(just_plot_floats("Selection intensity", bounds, iter));
+        });
+        s.spawn(|_| {
+            let iter = run.iterations.iter().map(|i| i.selection_diff);
+            let Some(bounds) = minmax_iter(iter.clone()) else { return };
+            selection_diff = Some(just_plot_floats("Selection diff", bounds, iter));
+        });
+        s.spawn(|_| {
+            let iter = run.iterations.iter().map(|i| i.fitness_std_dev);
+            let Some(bounds) = minmax_iter(iter.clone()) else { return };
+            fitness_std_dev = Some(just_plot_floats("Fitness std dev", bounds, iter));
+        });
+        s.spawn(|_| {
+            let iter = run.iterations.iter().map(|i| i.optimal_specimen_count);
+            let Some(bounds) = minmax_iter(iter.clone()) else { return };
+            optimal_specimen_count = Some(just_plot_ints("Optimal specimen count", bounds, iter));
+        });
+        s.spawn(|_| {
+            let iter = run.iterations.iter().map(|i| i.growth_rate);
+            let Some(bounds) = minmax_iter(iter.clone()) else { return };
+            growth_rate = Some(just_plot_floats("Growth rate", bounds, iter));
+        });
+        s.spawn(|_| {
+            let rr = run.iterations.iter().map(|i| i.rr);
+            let theta = run.iterations.iter().map(|i| i.theta);
+            let Some(bounds) = minmax_iter(rr.clone().chain(theta.clone())) else { return };
+            rr_and_theta = Some(plot_double(bounds, (rr, "RR"), (theta, "Theta")));
+        });
+        s.spawn(|_| {
+            let intensity = run.iterations.iter().map(|i| i.selection_intensity);
+            let diff = run.iterations.iter().map(|i| i.selection_diff);
+            let Some(bounds) = minmax_iter(intensity.clone().chain(diff.clone())) else { return };
+            selection_intensity_and_diff = Some(plot_double(bounds, (intensity, "Selection intensity"), (diff, "Selection difference")));
         });
     });
 
-    write_all!(file_limiter, &path; avg_fitness, best_fitness)?;
+    write_all!(file_limiter, &path;
+        avg_fitness,
+        best_fitness,
+        selection_intensity,
+        selection_diff,
+        fitness_std_dev,
+        optimal_specimen_count,
+        growth_rate,
+        rr_and_theta,
+        selection_intensity_and_diff,
+    )?;
 
     Ok(())
 }

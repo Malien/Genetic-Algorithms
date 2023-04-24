@@ -194,8 +194,8 @@ impl AlgoDescriptor for BinaryAlgo {
 impl AlgoDescriptor for (PheonotypeAlgo, GenomeEncoding) {
     fn name(&self) -> &'static str {
         match self.0 {
-            PheonotypeAlgo::Pow1 => "Pow1",
-            PheonotypeAlgo::Pow2 => "Pow2",
+            PheonotypeAlgo::Pow1 => "x^2",
+            PheonotypeAlgo::Pow2 => "5.12^2 - x^2",
         }
     }
     fn args(&self) -> Option<String> {
@@ -540,10 +540,9 @@ fn main() {
         len: config_10.len() + config_100.len(),
         runtime: runtime.handle().clone(),
     };
-    let thread_pool = rayon::ThreadPoolBuilder::new().build().unwrap();
     println!("Running {} configs", program_state.len);
 
-    thread_pool.scope(|s| {
+    rayon::scope(|s| {
         for config in config_10 {
             let program_state = &program_state;
             s.spawn(move |_| run_config(program_state, config));

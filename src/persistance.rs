@@ -115,6 +115,7 @@ pub async fn create_config_writer() -> io::Result<CSVFile> {
     let file = tokio::fs::File::create("data/stats.csv").await?;
     let mut writer = csv_async::AsyncWriterBuilder::new()
         .buffer_capacity(256 * 1024)
+        .delimiter(b';')
         .create_writer(file);
 
     writer
@@ -485,6 +486,7 @@ async fn write_optimumless(
         let file = tokio::fs::File::create(path.join("runs.csv")).await?;
         let mut writer = csv_async::AsyncWriterBuilder::new()
             .buffer_capacity(32 * 1024)
+            .delimiter(b';')
             .create_writer(file);
 
         writer
@@ -571,6 +573,7 @@ async fn write_with_optimum(
         let file = tokio::fs::File::create(path.join("runs.csv")).await?;
         let mut writer = csv_async::AsyncWriterBuilder::new()
             .buffer_capacity(32 * 1024)
+            .delimiter(b';')
             .create_writer(file);
         writer
             .write_record([
@@ -686,7 +689,9 @@ async fn write_run_with_optimum(
 ) -> eyre::Result<()> {
     let _permit = file_limiter.acquire().await.unwrap();
     let file = tokio::fs::File::create(path.join("iterations.csv")).await?;
-    let mut writer = csv_async::AsyncWriter::from_writer(file);
+    let mut writer = csv_async::AsyncWriterBuilder::new()
+        .delimiter(b';')
+        .create_writer(file);
     writer
         .write_record([
             "selection_intensity",
@@ -744,7 +749,9 @@ async fn write_optimumless_run(
 ) -> eyre::Result<()> {
     let _permit = file_limiter.acquire().await.unwrap();
     let file = tokio::fs::File::create(path.join("iterations.csv")).await?;
-    let mut writer = csv_async::AsyncWriter::from_writer(file);
+    let mut writer = csv_async::AsyncWriterBuilder::new()
+        .delimiter(b';')
+        .create_writer(file);
 
     writer
         .write_record([
@@ -784,7 +791,9 @@ async fn write_iteration_population<'a>(
 
     let _permit = file_limiter.acquire().await.unwrap();
     let file = tokio::fs::File::create(path.join("population.csv")).await?;
-    let mut writer = csv_async::AsyncWriter::from_writer(file);
+    let mut writer = csv_async::AsyncWriterBuilder::new()
+        .delimiter(b';')
+        .create_writer(file);
 
     match &population.phenotype {
         Some(phenotypes) => {
