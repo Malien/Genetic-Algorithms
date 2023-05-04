@@ -4,9 +4,10 @@ use std::{
 };
 
 use futures::{future::try_join, try_join};
+use tokio::io::AsyncWriteExt;
 
 use crate::{
-    graphs::{draw_optimumless_run_graphs, draw_run_with_optimum_graphs, GraphDescriptor},
+    graphs::{GraphDescriptor, RunGraphs},
     selection::{Selection, TournamentReplacement},
     stats::{
         ConfigStats, ConfigStatsWithOptimum, OptimumDisabiguity, OptimumlessConfigStats,
@@ -465,16 +466,14 @@ pub async fn write_stats<T: AlgoDescriptor + GraphDescriptor + Clone>(
     let path = key.to_path();
 
     match stats {
-        WithOptimum(stats) => write_with_optimum(key.algo_type, file_limiter, &path, stats).await?,
-        Optimumless(stats) => write_optimumless(key.algo_type, file_limiter, &path, stats).await?,
+        WithOptimum(stats) => write_with_optimum(file_limiter, &path, stats).await?,
+        Optimumless(stats) => write_optimumless(file_limiter, &path, stats).await?,
     };
-    println!("Wrote stats for {:?}", path);
 
     Ok(())
 }
 
 async fn write_optimumless(
-    descriptor: impl GraphDescriptor + Clone,
     file_limiter: &tokio::sync::Semaphore,
     path: &Path,
     stats: &OptimumlessConfigStats,
@@ -538,7 +537,6 @@ async fn write_optimumless(
             tokio::fs::create_dir_all(&path).await?;
             if n <= 5 {
                 try_join!(
-                    draw_optimumless_run_graphs(file_limiter, descriptor.clone(), &path, run),
                     write_optimumless_run(file_limiter, &path, run),
                     write_population(
                         file_limiter,
@@ -561,7 +559,6 @@ async fn write_optimumless(
 }
 
 async fn write_with_optimum(
-    descriptor: impl GraphDescriptor + Clone,
     file_limiter: &tokio::sync::Semaphore,
     path: &Path,
     stats: &ConfigStatsWithOptimum,
@@ -660,7 +657,6 @@ async fn write_with_optimum(
             tokio::fs::create_dir_all(&path).await?;
             if n <= 5 {
                 try_join!(
-                    draw_run_with_optimum_graphs(file_limiter, descriptor.clone(), &path, run),
                     write_run_with_optimum(file_limiter, &path, run),
                     write_population(
                         file_limiter,
@@ -827,6 +823,88 @@ async fn write_iteration_population<'a>(
 
     writer.flush().await?;
     drop(writer);
+    tokio::task::yield_now().await;
+
+    Ok(())
+}
+
+macro_rules! write_all_graphs {
+    ($file_limiter:expr, $path:expr, $run:expr; $($ident:ident),+ $(,)?) => {
+        $(
+            if let Some(buf) = $run.$ident {
+                write_graph($file_limiter, &$path.join(concat!(stringify!($ident), ".png")), &buf).await?;
+            }
+        )+
+    };
+}
+
+pub async fn write_graphs(
+    file_limiter: &tokio::sync::Semaphore,
+    key: ConfigKey<impl GraphDescriptor + AlgoDescriptor>,
+    graphs: Vec<RunGraphs>,
+) -> io::Result<()> {
+    let path = key.to_path();
+
+    for (idx, run) in graphs.into_iter().enumerate() {
+        let path = path.join(format!("{idx}"));
+        tokio::fs::create_dir_all(&path).await?;
+
+        write_all_graphs!(file_limiter, path, run;
+            avg_fitness,
+            best_fitness,
+            fitness_std_dev,
+            rr_and_theta,
+            selection_intensity,
+            selection_diff,
+            optimal_specimen_count,
+            growth_rate,
+            selection_intensity_and_diff,
+        );
+
+        {
+            let path = path.join("final");
+            tokio::fs::create_dir_all(&path).await?;
+            write_graph(
+                file_limiter,
+                &path.join("ones_count.png"),
+                &run.final_population.ones_count,
+            )
+            .await?;
+            write_all_graphs!(file_limiter, path, run.final_population;
+                fitness,
+                phenotype,
+            );
+        }
+
+        for (idx, population) in run.starting_population.into_iter().enumerate() {
+            let path = path.join(format!("{idx}"));
+            tokio::fs::create_dir_all(&path).await?;
+            write_graph(
+                file_limiter,
+                &path.join("ones_count.png"),
+                &population.ones_count,
+            )
+            .await?;
+            write_all_graphs!(file_limiter, path, population;
+                fitness,
+                phenotype,
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn write_graph(
+    file_limiter: &tokio::sync::Semaphore,
+    path: &Path,
+    graph: &[u8],
+) -> io::Result<()> {
+    let mut file = tokio::fs::File::create(path).await?;
+    let _permit = file_limiter.acquire().await;
+    file.write_all(&graph).await?;
+    file.flush().await?;
+    // Let's try this to let tokio properly close file handles
     tokio::task::yield_now().await;
 
     Ok(())

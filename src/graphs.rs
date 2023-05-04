@@ -1,30 +1,45 @@
-use std::path::Path;
-
+use arrayvec::ArrayVec;
 use decorum::N64;
-use futures::try_join;
 use num_traits::real::Real;
-use once_cell::sync::Lazy;
 use plotters::{
     backend::{BitMapBackend, PixelFormat, RGBPixel},
     chart::ChartBuilder,
-    coord::{
-        combinators::{IntoLinspace, IntoLogRange},
-        Shift,
-    },
+    coord::{combinators::IntoLinspace, Shift},
     drawing::IntoDrawingArea,
     prelude::PathElement,
     series::{Histogram, LineSeries},
     style::{colors, Color, IntoFont},
 };
-use tokio::io::AsyncWriteExt;
 
-use crate::stats::{OptimumlessRunStats, PopulationStats, RunStatsWithOptimum};
+use crate::stats::{
+    ConfigStats, OptimumDisabiguity, OptimumlessRunStats, PopulationStats, RunStatsWithOptimum,
+};
 use crate::{BinaryAlgo, GenomeEncoding, PheonotypeAlgo};
 
 const GRAPH_WIDTH: u32 = 600;
 const GRAPH_HEIGHT: u32 = 400;
 
 type DrawingArea<'a> = plotters::drawing::DrawingArea<BitMapBackend<'a, RGBPixel>, Shift>;
+
+pub struct RunGraphs {
+    pub starting_population: ArrayVec<PopulationGraphs, 5>,
+    pub final_population: PopulationGraphs,
+    pub avg_fitness: Option<Vec<u8>>,
+    pub best_fitness: Option<Vec<u8>>,
+    pub fitness_std_dev: Option<Vec<u8>>,
+    pub rr_and_theta: Option<Vec<u8>>,
+    pub selection_intensity: Option<Vec<u8>>,
+    pub selection_diff: Option<Vec<u8>>,
+    pub optimal_specimen_count: Option<Vec<u8>>,
+    pub growth_rate: Option<Vec<u8>>,
+    pub selection_intensity_and_diff: Option<Vec<u8>>,
+}
+
+pub struct PopulationGraphs {
+    pub fitness: Option<Vec<u8>>,
+    pub phenotype: Option<Vec<u8>>,
+    pub ones_count: Vec<u8>,
+}
 
 fn graph_image(configure: impl FnOnce(&DrawingArea) -> eyre::Result<()>) -> eyre::Result<Vec<u8>> {
     let mut buf = vec![0; GRAPH_WIDTH as usize * GRAPH_HEIGHT as usize * RGBPixel::PIXEL_SIZE];
@@ -43,7 +58,7 @@ fn graph_image(configure: impl FnOnce(&DrawingArea) -> eyre::Result<()>) -> eyre
     let mut encoded_buf = Vec::with_capacity(16 * 1024);
     let encoder = PngEncoder::new_with_quality(
         &mut encoded_buf,
-        CompressionType::Best,
+        CompressionType::Default,
         FilterType::NoFilter,
     );
     encoder.write_image(
@@ -313,259 +328,155 @@ impl GraphDescriptor for BinaryAlgo {
     }
 }
 
-async fn write_file(
-    file_limiter: &tokio::sync::Semaphore,
-    basename: &Path,
-    buf: tokio::task::JoinHandle<Option<eyre::Result<Vec<u8>>>>,
-    filename: &str,
-) -> eyre::Result<()> {
-    let buf = buf.await?;
-    let _permit = file_limiter.acquire().await;
-    let Some(buf) = buf else { return Ok(()) };
-    let buf = buf?;
-    let mut file = tokio::fs::File::create(basename.join(filename)).await?;
-    file.write_all(&buf).await?;
-    file.flush().await?;
-    // Let's try this to let tokio properly close file handles
-    tokio::task::yield_now().await;
-    Ok(())
-}
-
-macro_rules! write_all {
-    ($file_limiter:expr, $path:expr; $($future:ident),+ $(,)?) => {
-        try_join!(
-            $(write_file($file_limiter, $path, $future, concat!(stringify!($future), ".png"))),+
-        )
-    };
-}
-
-// A separate thread pool for drawing graphs
-static THREAD_POOL: Lazy<rayon::ThreadPool> =
-    Lazy::new(|| rayon::ThreadPoolBuilder::new().build().unwrap());
-
-pub async fn draw_population_graphs(
-    file_limiter: &tokio::sync::Semaphore,
-    descriptor: impl GraphDescriptor,
-    path: &Path,
+pub fn draw_population_graphs(
+    descriptor: &impl GraphDescriptor,
     population: &PopulationStats,
-) -> eyre::Result<()> {
-    tokio::fs::create_dir_all(&path).await?;
-
+) -> eyre::Result<PopulationGraphs> {
     let phenotype_bounds = descriptor.phenotype_bounds();
     let fitness_bounds = descriptor.fitness_bounds();
 
-    let ones_count = population.ones_count.to_vec();
-    let ones_count =
-        tokio::task::spawn_blocking(move || Some(population_ones_count_graph(&ones_count)));
+    let ones_count = population_ones_count_graph(&population.ones_count)?;
+    let phenotype = match (phenotype_bounds, &population.phenotype) {
+        (Some(bounds), Some(phenotypes)) => Some(population_phenotype_graph(bounds, phenotypes)?),
+        _ => None,
+    };
 
-    let phenotype = population.phenotype.clone();
-    let phenotype = tokio::task::spawn_blocking(move || {
-        let bounds = phenotype_bounds?;
-        Some(population_phenotype_graph(bounds, &phenotype?))
-    });
+    let fitness = match fitness_bounds {
+        Some(bounds) => Some(population_fitness_graph(bounds, &population.fitness)?),
+        _ => None,
+    };
 
-    let fitness = population.fitness.to_vec();
-    let fitness = tokio::task::spawn_blocking(move || {
-        let bounds = fitness_bounds?;
-        Some(population_fitness_graph(bounds, &fitness))
-    });
-
-    write_all!(file_limiter, &path; ones_count, phenotype, fitness)?;
-
-    Ok(())
+    Ok(PopulationGraphs {
+        fitness,
+        phenotype,
+        ones_count,
+    })
 }
 
-pub async fn draw_optimumless_run_graphs(
-    file_limiter: &tokio::sync::Semaphore,
-    descriptor: impl GraphDescriptor + Clone,
-    path: &Path,
+macro_rules! rewrap {
+    ($opt:expr, |$inner:pat_param| $block:expr) => {
+        match $opt {
+            Some($inner) => Some($block),
+            None => None,
+        }
+    };
+}
+
+pub fn draw_optimumless_run_graphs(
+    descriptor: &impl GraphDescriptor,
     run: &OptimumlessRunStats,
-) -> eyre::Result<()> {
-    tokio::fs::create_dir_all(&path).await?;
+) -> eyre::Result<RunGraphs> {
+    let starting_population = run
+        .starting_population
+        .iter()
+        .map(|p| draw_population_graphs(descriptor, p))
+        .collect::<Result<_, _>>()?;
 
-    for (i, population) in run.starting_population.iter().enumerate() {
-        draw_population_graphs(
-            file_limiter,
-            descriptor.clone(),
-            &path.join(i.to_string()),
-            population,
-        )
-        .await?;
-    }
+    let final_population = draw_population_graphs(descriptor, &run.final_population)?;
 
-    draw_population_graphs(
-        file_limiter,
-        descriptor,
-        &path.join("final"),
-        &run.final_population,
-    )
-    .await?;
-
-    let avg_fitness: Vec<N64> = run.iterations.iter().map(|i| i.avg_fitness).collect();
-    let avg_fitness = tokio::task::spawn_blocking(move || {
-        let (&min, &max) = minmax_iter(&avg_fitness)?;
-        Some(just_plot_floats("Fitness", (min, max), avg_fitness))
+    let avg_fitness = run.iterations.iter().map(|i| i.avg_fitness);
+    let avg_fitness = rewrap!(minmax_iter(avg_fitness.clone()), |bounds| {
+        just_plot_floats("Fitness", bounds, avg_fitness)?
     });
 
-    let best_fitness: Vec<N64> = run.iterations.iter().map(|i| i.best_fitness).collect();
-    let best_fitness = tokio::task::spawn_blocking(move || {
-        let (&min, &max) = minmax_iter(&best_fitness)?;
-        Some(just_plot_floats("Best fitness", (min, max), best_fitness))
+    let best_fitness = run.iterations.iter().map(|i| i.best_fitness);
+    let best_fitness = rewrap!(minmax_iter(best_fitness.clone()), |bounds| {
+        just_plot_floats("Best fitness", bounds, best_fitness)?
     });
 
     let fitness_std_dev: Vec<N64> = run.iterations.iter().map(|i| i.fitness_std_dev).collect();
-    let fitness_std_dev = tokio::task::spawn_blocking(move || {
-        let (&min, &max) = minmax_iter(fitness_std_dev.iter())?;
-        Some(just_plot_floats(
-            "Fitness standard deviation",
-            (min, max),
-            fitness_std_dev,
-        ))
+    let fitness_std_dev = rewrap!(minmax_iter(&fitness_std_dev), |(&min, &max)| {
+        just_plot_floats("Fitness standard deviation", (min, max), fitness_std_dev)?
     });
 
-    let rr: Vec<N64> = run.iterations.iter().map(|i| i.rr).collect();
-    let theta: Vec<N64> = run.iterations.iter().map(|i| i.theta).collect();
-    let rr_and_theta = tokio::task::spawn_blocking(move || {
-        let (&min, &max) = minmax_iter(rr.iter().chain(&theta))?;
-        Some(plot_double(
-            (min, max),
-            (rr.into_iter(), "RR"),
-            (theta.into_iter(), "Theta"),
-        ))
+    let rr = run.iterations.iter().map(|i| i.rr);
+    let theta = run.iterations.iter().map(|i| i.theta);
+    let rr_and_theta = rewrap!(minmax_iter(rr.clone().chain(theta.clone())), |bounds| {
+        plot_double(bounds, (rr, "RR"), (theta, "Theta"))?
     });
 
-    write_all!(file_limiter, &path; avg_fitness, best_fitness, fitness_std_dev, rr_and_theta)?;
-
-    Ok(())
+    Ok(RunGraphs {
+        starting_population,
+        final_population,
+        avg_fitness,
+        best_fitness,
+        fitness_std_dev,
+        rr_and_theta,
+        optimal_specimen_count: None,
+        growth_rate: None,
+        selection_diff: None,
+        selection_intensity: None,
+        selection_intensity_and_diff: None,
+    })
 }
 
-pub async fn draw_run_with_optimum_graphs(
-    file_limiter: &tokio::sync::Semaphore,
-    descriptor: impl GraphDescriptor + Clone,
-    path: &Path,
+pub fn draw_run_with_optimum_graphs(
+    descriptor: &impl GraphDescriptor,
     run: &RunStatsWithOptimum,
-) -> eyre::Result<()> {
-    tokio::fs::create_dir_all(&path).await?;
-
-    for (i, population) in run.starting_population.iter().enumerate() {
-        draw_population_graphs(
-            file_limiter,
-            descriptor.clone(),
-            &path.join(i.to_string()),
-            population,
-        )
-        .await?;
-    }
-
-    draw_population_graphs(
-        file_limiter,
-        descriptor,
-        &path.join("final"),
-        &run.final_population,
-    )
-    .await?;
-
-    let avg_fitness: Vec<_> = run.iterations.iter().map(|i| i.avg_fitness).collect();
-    let avg_fitness = tokio::task::spawn_blocking(move || {
-        let (&min, &max) = minmax_iter(&avg_fitness)?;
-        Some(just_plot_floats("Fitness", (min, max), avg_fitness))
-    });
-
-    let best_fitness: Vec<_> = run.iterations.iter().map(|i| i.best_fitness).collect();
-    let best_fitness = tokio::task::spawn_blocking(move || {
-        let (&min, &max) = minmax_iter(&best_fitness)?;
-        Some(just_plot_floats("Best fitness", (min, max), best_fitness))
-    });
-
-    let selection_diff: Vec<_> = run.iterations.iter().map(|i| i.selection_diff).collect();
-    let selection_diff = tokio::task::spawn_blocking(move || {
-        let (&min, &max) = minmax_iter(&selection_diff)?;
-        Some(just_plot_floats(
-            "Selection difference",
-            (min, max),
-            selection_diff,
-        ))
-    });
-
-    let fitness_std_dev: Vec<_> = run.iterations.iter().map(|i| i.fitness_std_dev).collect();
-    let fitness_std_dev = tokio::task::spawn_blocking(move || {
-        let (&min, &max) = minmax_iter(&fitness_std_dev)?;
-        Some(just_plot_floats(
-            "Fitness standard deviation",
-            (min, max),
-            fitness_std_dev,
-        ))
-    });
-
-    let optimal_specimen_count: Vec<_> = run
-        .iterations
+) -> eyre::Result<RunGraphs> {
+    let starting_population = run
+        .starting_population
         .iter()
-        .map(|i| i.optimal_specimen_count)
-        .collect();
-    let optimal_specimen_count = tokio::task::spawn_blocking(move || {
-        let (&min, &max) = minmax_iter(&optimal_specimen_count)?;
-        Some(just_plot_ints(
-            "Optimal specimen count",
-            (min, max),
-            optimal_specimen_count,
-        ))
+        .map(|p| draw_population_graphs(descriptor, p))
+        .collect::<Result<_, _>>()?;
+
+    let final_population = draw_population_graphs(descriptor, &run.final_population)?;
+
+    let avg_fitness = run.iterations.iter().map(|i| i.avg_fitness);
+    let avg_fitness = rewrap!(minmax_iter(avg_fitness.clone()), |bounds| {
+        just_plot_floats("Fitness", bounds, avg_fitness)?
     });
 
-    let growth_rate: Vec<_> = run.iterations.iter().map(|i| i.growth_rate).collect();
-    let growth_rate = tokio::task::spawn_blocking(move || {
-        let (&min, &max) = minmax_iter(&growth_rate)?;
-        Some(just_plot_floats("Growth rate", (min, max), growth_rate))
+    let best_fitness = run.iterations.iter().map(|i| i.best_fitness);
+    let best_fitness = rewrap!(minmax_iter(best_fitness.clone()), |bounds| {
+        just_plot_floats("Best fitness", bounds, best_fitness)?
     });
 
-    let rr: Vec<_> = run.iterations.iter().map(|i| i.rr).collect();
-    let theta: Vec<_> = run.iterations.iter().map(|i| i.theta).collect();
-    let rr_and_theta = tokio::task::spawn_blocking(move || {
-        let (&min, &max) = minmax_iter(rr.iter().chain(&theta))?;
-        Some(plot_double(
-            (min, max),
-            (rr.into_iter(), "RR"),
-            (theta.into_iter(), "Theta"),
-        ))
+    let fitness_std_dev = run.iterations.iter().map(|i| i.fitness_std_dev);
+    let fitness_std_dev = rewrap!(minmax_iter(fitness_std_dev.clone()), |bounds| {
+        just_plot_floats("Fitness standard deviation", bounds, fitness_std_dev)?
     });
 
-    let selection_intensity: Vec<_> = run
-        .iterations
-        .iter()
-        .map(|i| i.selection_intensity)
-        .collect();
-    let selection_diff: Vec<_> = run.iterations.iter().map(|i| i.selection_diff).collect();
-    let selection_intensity_and_diff = tokio::task::spawn_blocking({
-        let selection_intensity = selection_intensity.clone();
-        let selection_diff = selection_diff.clone();
-        move || {
-            let (&min, &max) = minmax_iter(selection_intensity.iter().chain(&selection_diff))?;
-            Some(plot_double(
-                (min, max),
-                (selection_intensity.into_iter(), "Selection intensity"),
-                (selection_diff.into_iter(), "Selection difference"),
-            ))
+    let optimal_specimen_count = run.iterations.iter().map(|i| i.optimal_specimen_count);
+    let optimal_specimen_count = rewrap!(minmax_iter(optimal_specimen_count.clone()), |bounds| {
+        just_plot_ints("Optimal specimen count", bounds, optimal_specimen_count)?
+    });
+
+    let growth_rate = run.iterations.iter().map(|i| i.growth_rate);
+    let growth_rate = rewrap!(minmax_iter(growth_rate.clone()), |bounds| {
+        just_plot_floats("Growth rate", bounds, growth_rate)?
+    });
+
+    let rr = run.iterations.iter().map(|i| i.rr);
+    let theta = run.iterations.iter().map(|i| i.theta);
+    let rr_and_theta = rewrap!(minmax_iter(rr.clone().chain(theta.clone())), |bounds| {
+        plot_double(bounds, (rr, "RR"), (theta, "Theta"))?
+    });
+
+    let selection_intensity = run.iterations.iter().map(|i| i.selection_intensity);
+    let selection_diff = run.iterations.iter().map(|i| i.selection_diff);
+    let selection_intensity_and_diff = rewrap!(
+        minmax_iter(selection_intensity.clone().chain(selection_diff.clone())),
+        |bounds| {
+            plot_double(
+                bounds,
+                (selection_intensity.clone(), "Selection intensity"),
+                (selection_diff.clone(), "Selection difference"),
+            )?
         }
+    );
+
+    let selection_intensity = rewrap!(minmax_iter(selection_intensity.clone()), |bounds| {
+        just_plot_floats("Selection intensity", bounds, selection_intensity)?
     });
 
-    let selection_intensity = tokio::task::spawn_blocking(move || {
-        let (&min, &max) = minmax_iter(&selection_intensity)?;
-        Some(just_plot_floats(
-            "Selection intensity",
-            (min, max),
-            selection_intensity,
-        ))
+    let selection_diff = rewrap!(minmax_iter(selection_diff.clone()), |bounds| {
+        just_plot_floats("Selection difference", bounds, selection_diff)?
     });
 
-    let selection_diff = tokio::task::spawn_blocking(move || {
-        let (&min, &max) = minmax_iter(&selection_diff)?;
-        Some(just_plot_floats(
-            "Selection difference",
-            (min, max),
-            selection_diff,
-        ))
-    });
-
-    write_all!(file_limiter, &path;
+    Ok(RunGraphs {
+        starting_population,
+        final_population,
         avg_fitness,
         best_fitness,
         selection_intensity,
@@ -575,7 +486,25 @@ pub async fn draw_run_with_optimum_graphs(
         growth_rate,
         rr_and_theta,
         selection_intensity_and_diff,
-    )?;
+    })
+}
 
-    Ok(())
+pub fn draw_graphs(
+    descriptor: &impl GraphDescriptor,
+    stats: &ConfigStats,
+) -> eyre::Result<Vec<RunGraphs>> {
+    match stats {
+        OptimumDisabiguity::WithOptimum(stats) => stats
+            .runs
+            .iter()
+            .take(5)
+            .map(|run| draw_run_with_optimum_graphs(descriptor, run))
+            .collect(),
+        OptimumDisabiguity::Optimumless(stats) => stats
+            .runs
+            .iter()
+            .take(5)
+            .map(|run| draw_optimumless_run_graphs(descriptor, run))
+            .collect(),
+    }
 }

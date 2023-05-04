@@ -1,5 +1,6 @@
 #![feature(iter_array_chunks)]
 #![feature(generic_const_exprs)]
+#![feature(try_blocks)]
 use std::{
     ops::{Deref, DerefMut},
     sync::{atomic::AtomicUsize, Arc},
@@ -29,7 +30,10 @@ use persistance::{write_stats, CSVFile, ConfigKey};
 use selection::{selection, Selection, SelectionResult, TournamentReplacement};
 use stats::{ConfigStats, RunStats, StatEncoder, SuccessFamily};
 
-use crate::persistance::{append_config, create_config_writer};
+use crate::{
+    graphs::draw_graphs,
+    persistance::{append_config, create_config_writer, write_graphs},
+};
 
 const MAX_GENERATIONS: usize = 10_000_000;
 const MAX_RUNS: usize = 100;
@@ -473,10 +477,20 @@ where
     [(); bitvec::mem::elts::<u16>(F::N)]:,
     F::AlgoType: GraphDescriptor + Send + Sync + 'static,
 {
-    let solved = state.counter.load(std::sync::atomic::Ordering::SeqCst);
+    let runs = (0..MAX_RUNS)
+        .map(|run_idx| {
+            let run_state = RunState::new(&config, run_idx);
+            simulation(run_state)
+        })
+        .collect();
+    let solved = state
+        .counter
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let stats = Arc::new(ConfigStats::new(runs));
     println!(
-        "Solved {}/{} ({}%)\tConfiguration: {}-{}/crossover={}/mutation={}/{}",
-        solved + 1,
+        "[{:?}]\tSolved {}/{} ({}%)\tConfiguration: {}-{}/crossover={}/mutation={}/{}",
+        std::thread::current().id(),
+        solved,
         state.len,
         (solved + 1) * 100 / state.len,
         config.ty.name(),
@@ -485,16 +499,6 @@ where
         config.mutation_rate.is_some(),
         config.selection,
     );
-    let runs = (0..MAX_RUNS)
-        .map(|run_idx| {
-            let run_state = RunState::new(&config, run_idx);
-            simulation(run_state)
-        })
-        .collect();
-    state
-        .counter
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let stats = Arc::new(ConfigStats::new(runs));
 
     let mut write_tasks = state.write_tasks.lock().unwrap();
     write_tasks.spawn_on(
@@ -505,8 +509,9 @@ where
             async move {
                 write_stats(file_limiter.as_ref(), key, stats.as_ref())
                     .await
-                    .wrap_err_with(|| key)
+                    .wrap_err_with(|| format!("Writing stats {key}"))
                     .unwrap();
+                println!("Wrote stats for {key}");
             }
         },
         &state.runtime,
@@ -521,11 +526,46 @@ where
                 let mut writer = config_writer.lock().await;
                 append_config(writer.deref_mut(), key, stats.as_ref())
                     .await
+                    .wrap_err_with(|| format!("Appending config {key}"))
                     .unwrap();
             }
         },
         &state.runtime,
     );
+    drop(write_tasks);
+
+    #[cfg(not(feature = "drop_graphs"))]
+    {
+        let graphs = draw_graphs(&config.ty, stats.as_ref()).expect("Drawing to succeed");
+        println!(
+            "[{:?}]\tDrew graphs {}/{} ({}%)\tConfiguration: {}-{}/crossover={}/mutation={}/{}",
+            std::thread::current().id(),
+            solved,
+            state.len,
+            (solved + 1) * 100 / state.len,
+            config.ty.name(),
+            config.ty.args().unwrap_or_default(),
+            config.apply_crossover,
+            config.mutation_rate.is_some(),
+            config.selection,
+        );
+
+        let mut write_tasks = state.write_tasks.lock().unwrap();
+        write_tasks.spawn_on(
+            {
+                let key = config.to_key();
+                let file_limiter = Arc::clone(&state.file_limiter);
+                async move {
+                    write_graphs(file_limiter.as_ref(), key, graphs)
+                        .await
+                        .wrap_err_with(|| format!("Writing graphs of {key}"))
+                        .unwrap();
+                    println!("Wrote graphs for {key}");
+                }
+            },
+            &state.runtime,
+        );
+    }
 }
 
 fn main() {
