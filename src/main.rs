@@ -3,6 +3,7 @@
 use std::{
     ops::{Deref, DerefMut},
     sync::{atomic::AtomicUsize, Arc},
+    time::Duration,
 };
 
 use bitvec::{order::Lsb0, slice::BitSlice, BitArr};
@@ -388,7 +389,14 @@ fn config_permutations_100() -> Vec<AlgoConfig<G100>> {
     let mut res = vec![];
 
     perms! {
-        (population_size, mutation_rate) in [(100, 0.00001)];
+        (population_size, mutation_rate) in [
+            (100, 0.00001),
+            // (200, 0.00001 / 2.0),
+            // (300, 0.00001 / 3.0),
+            // (400, 0.00001 / 4.0),
+            // (500, 0.00001 / 5.0),
+            // (1000, 0.00001 / 10.0),
+        ];
         apply_crossover in [true, false];
         apply_mutation in [true, false];
         selection_prob in [1.0, 0.8, 0.7, 0.6];
@@ -416,7 +424,14 @@ fn config_permutations_10() -> Vec<AlgoConfig<G10>> {
     let mut res = vec![];
 
     perms! {
-        (population_size, mutation_rate) in [(100, 0.0005)];
+        (population_size, mutation_rate) in [
+            (100, 0.0005),
+            // (200, 0.0005 / 2.0),
+            // (300, 0.0005 / 3.0),
+            // (400, 0.0005 / 4.0),
+            // (500, 0.0005 / 5.0),
+            // (1000, 0.0005 / 10.0)
+        ];
         apply_crossover in [true, false];
         apply_mutation in [true, false];
         selection_prob in [1.0, 0.8, 0.7, 0.6];
@@ -516,7 +531,11 @@ where
 fn main() {
     color_eyre::install().unwrap();
 
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_keep_alive(Duration::from_secs(100))
+        .build()
+        .unwrap();
     let config_10 = config_permutations_10();
     let config_100 = config_permutations_100();
     // let config_100: Vec<AlgoConfig<G100>> = vec![];
@@ -578,9 +597,9 @@ fn main() {
 async fn wait_for_arc<T>(mut arc: Arc<T>) -> T {
     loop {
         match Arc::try_unwrap(arc) {
-            Ok(t) => return t,
-            Err(t) => {
-                arc = t;
+            Ok(value) => return value,
+            Err(same_arc) => {
+                arc = same_arc;
                 tokio::task::yield_now().await;
             }
         };
