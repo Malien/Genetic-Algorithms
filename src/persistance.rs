@@ -28,26 +28,34 @@ pub struct ConfigKey<T> {
 }
 
 impl<T: AlgoDescriptor> ConfigKey<T> {
-    fn to_path(&self) -> PathBuf {
+    fn to_tables_path(&self) -> PathBuf {
         let mut path = PathBuf::new();
+
         path.push("data");
-
-        path.push(self.algo_type.name());
-        if let Some(args) = self.algo_type.args() {
-            path.push(args);
-        }
-
-        path.push(if self.apply_crossover {
-            "crossover"
-        } else {
-            "no-crossover"
-        });
-        path.push(if self.apply_mutation {
-            "mutation"
-        } else {
-            "no-mutation"
-        });
         path.push(format!("{}", self.population_size));
+        path.push("tables");
+        path.push(self.algo_type.category());
+        path.push(self.algo_type.name());
+        self.append_genops_path(&mut path);
+        self.append_selection_path(&mut path);
+
+        path
+    }
+
+    fn to_graphs_path(&self) -> PathBuf {
+        let mut path = PathBuf::new();
+
+        path.push("data");
+        path.push(format!("{}", self.population_size));
+        path.push(format!("graphs-{}", self.algo_type.category()));
+        path.push(self.algo_type.name());
+        self.append_genops_path(&mut path);
+        self.append_selection_path(&mut path);
+
+        path
+    }
+
+    fn append_selection_path(&self, path: &mut PathBuf) {
         match self.selection {
             Selection::StochasticTournament {
                 prob,
@@ -66,7 +74,19 @@ impl<T: AlgoDescriptor> ConfigKey<T> {
                 path.push(format!("{:.1}", prob));
             }
         };
-        path
+    }
+
+    fn append_genops_path(&self, path: &mut PathBuf) {
+        path.push(if self.apply_crossover {
+            "crossover"
+        } else {
+            "no-crossover"
+        });
+        path.push(if self.apply_mutation {
+            "mutation"
+        } else {
+            "no-mutation"
+        });
     }
 
     fn selection_name(&self) -> &'static str {
@@ -99,9 +119,9 @@ impl<T: AlgoDescriptor> std::fmt::Display for ConfigKey<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}-{}/{}/crossover={}/mutation={}/{}/{}",
+            "{}/{}/{}/crossover={}/mutation={}/{}/{}",
+            self.algo_type.category(),
             self.algo_type.name(),
-            self.algo_type.args().unwrap_or_default(),
             self.population_size,
             self.apply_crossover,
             self.apply_mutation,
@@ -121,8 +141,8 @@ pub async fn create_config_writer() -> io::Result<CSVFile> {
 
     writer
         .write_record([
+            "algo_category",
             "algo_name",
-            "algo_args",
             "population_size",
             "apply_crossover",
             "apply_mutation",
@@ -199,8 +219,8 @@ async fn append_config_with_optimum<T: AlgoDescriptor>(
 ) -> io::Result<()> {
     writer
         .write_record([
+            key.algo_type.category(),
             key.algo_type.name(),
-            &key.algo_type.args().unwrap_or_default(),
             &key.population_size.to_string(),
             &key.apply_crossover.to_string(),
             &key.apply_mutation.to_string(),
@@ -336,8 +356,8 @@ async fn append_config_optimumless<T: AlgoDescriptor>(
 ) -> io::Result<()> {
     writer
         .write_record([
+            &key.algo_type.category(),
             key.algo_type.name(),
-            &key.algo_type.args().unwrap_or_default(),
             &key.population_size.to_string(),
             &key.apply_crossover.to_string(),
             &key.apply_mutation.to_string(),
@@ -463,7 +483,7 @@ pub async fn write_stats<T: AlgoDescriptor + GraphDescriptor + Clone>(
     stats: &ConfigStats,
 ) -> eyre::Result<()> {
     use OptimumDisabiguity::*;
-    let path = key.to_path();
+    let path = key.to_tables_path();
 
     match stats {
         WithOptimum(stats) => write_with_optimum(file_limiter, &path, stats).await?,
@@ -843,7 +863,7 @@ pub async fn write_graphs(
     key: ConfigKey<impl GraphDescriptor + AlgoDescriptor>,
     graphs: Vec<RunGraphs>,
 ) -> io::Result<()> {
-    let path = key.to_path();
+    let path = key.to_graphs_path();
 
     for (idx, run) in graphs.into_iter().enumerate() {
         let path = path.join(format!("{idx}"));

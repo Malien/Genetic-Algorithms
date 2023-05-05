@@ -1,9 +1,9 @@
 #![feature(iter_array_chunks)]
 #![feature(generic_const_exprs)]
-#![feature(try_blocks)]
+#![feature(type_changing_struct_update)]
 use std::{
     ops::{Deref, DerefMut},
-    sync::{atomic::AtomicUsize, Arc},
+    sync::Arc,
     time::Duration,
 };
 
@@ -18,6 +18,7 @@ mod evaluation;
 mod graphs;
 mod operators;
 mod persistance;
+mod reports;
 mod selection;
 mod stats;
 
@@ -27,12 +28,15 @@ use evaluation::{
 };
 use operators::{crossover, mutation};
 use persistance::{write_stats, CSVFile, ConfigKey};
+use reports::Report;
 use selection::{selection, Selection, SelectionResult, TournamentReplacement};
 use stats::{ConfigStats, RunStats, StatEncoder, SuccessFamily};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 use crate::{
     graphs::draw_graphs,
     persistance::{append_config, create_config_writer, write_graphs},
+    reports::run_reports,
 };
 
 const MAX_GENERATIONS: usize = 10_000_000;
@@ -178,7 +182,28 @@ where
 
 pub trait AlgoDescriptor {
     fn name(&self) -> &'static str;
-    fn args(&self) -> Option<String>;
+    fn category(&self) -> &'static str;
+    fn materialize(&self) -> MaterializedDescriptor {
+        MaterializedDescriptor {
+            category: self.category(),
+            name: self.name(),
+        }
+    }
+}
+
+pub struct MaterializedDescriptor {
+    category: &'static str,
+    name: &'static str,
+}
+
+impl AlgoDescriptor for MaterializedDescriptor {
+    fn category(&self) -> &'static str {
+        self.category
+    }
+
+    fn name(&self) -> &'static str {
+        self.name
+    }
 }
 
 impl AlgoDescriptor for BinaryAlgo {
@@ -188,11 +213,8 @@ impl AlgoDescriptor for BinaryAlgo {
             BinaryAlgo::FHD { .. } => "FHD",
         }
     }
-    fn args(&self) -> Option<String> {
-        match self {
-            BinaryAlgo::FConst => None,
-            BinaryAlgo::FHD { sigma } => Some(format!("sigma={}", sigma)),
-        }
+    fn category(&self) -> &'static str {
+        "binary"
     }
 }
 
@@ -203,10 +225,10 @@ impl AlgoDescriptor for (PheonotypeAlgo, GenomeEncoding) {
             PheonotypeAlgo::Pow2 => "5.12^2 - x^2",
         }
     }
-    fn args(&self) -> Option<String> {
+    fn category(&self) -> &'static str {
         match self.1 {
-            GenomeEncoding::Binary => Some("binary".to_string()),
-            GenomeEncoding::BinaryGray => Some("gray".to_string()),
+            GenomeEncoding::Binary => "real",
+            GenomeEncoding::BinaryGray => "real-gray",
         }
     }
 }
@@ -468,8 +490,8 @@ struct ProgramState {
     runtime: tokio::runtime::Handle,
     config_writer: Arc<tokio::sync::Mutex<CSVFile>>,
     write_tasks: std::sync::Mutex<tokio::task::JoinSet<()>>,
-    counter: AtomicUsize,
     len: usize,
+    report_chan: UnboundedSender<Report>,
 }
 
 fn run_config<F: FullFamily>(state: &ProgramState, config: AlgoConfig<F>)
@@ -477,41 +499,30 @@ where
     [(); bitvec::mem::elts::<u16>(F::N)]:,
     F::AlgoType: GraphDescriptor + Send + Sync + 'static,
 {
+    let thread_id = std::thread::current().id();
+    let key = config.to_key();
+
+    let _ = state.report_chan.send(Report::solving(thread_id, key));
     let runs = (0..MAX_RUNS)
         .map(|run_idx| {
             let run_state = RunState::new(&config, run_idx);
             simulation(run_state)
         })
         .collect();
-    let solved = state
-        .counter
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let stats = Arc::new(ConfigStats::new(runs));
-    println!(
-        "[{:?}]\tSolved {}/{} ({}%)\tConfiguration: {}-{}/crossover={}/mutation={}/{}",
-        std::thread::current().id(),
-        solved,
-        state.len,
-        (solved + 1) * 100 / state.len,
-        config.ty.name(),
-        config.ty.args().unwrap_or_default(),
-        config.apply_crossover,
-        config.mutation_rate.is_some(),
-        config.selection,
-    );
 
     let mut write_tasks = state.write_tasks.lock().unwrap();
     write_tasks.spawn_on(
         {
-            let key = config.to_key();
             let stats = Arc::clone(&stats);
             let file_limiter = Arc::clone(&state.file_limiter);
+            let report_chan = state.report_chan.clone();
             async move {
                 write_stats(file_limiter.as_ref(), key, stats.as_ref())
                     .await
                     .wrap_err_with(|| format!("Writing stats {key}"))
                     .unwrap();
-                println!("Wrote stats for {key}");
+                let _ = report_chan.send(Report::wrote_tables(key));
             }
         },
         &state.runtime,
@@ -520,7 +531,6 @@ where
     write_tasks.spawn_on(
         {
             let stats = Arc::clone(&stats);
-            let key = config.to_key();
             let config_writer = Arc::clone(&state.config_writer);
             async move {
                 let mut writer = config_writer.lock().await;
@@ -536,31 +546,21 @@ where
 
     #[cfg(not(feature = "drop_graphs"))]
     {
+        let _ = state.report_chan.send(Report::graphing(thread_id, key));
         let graphs = draw_graphs(&config.ty, stats.as_ref()).expect("Drawing to succeed");
-        println!(
-            "[{:?}]\tDrew graphs {}/{} ({}%)\tConfiguration: {}-{}/crossover={}/mutation={}/{}",
-            std::thread::current().id(),
-            solved,
-            state.len,
-            (solved + 1) * 100 / state.len,
-            config.ty.name(),
-            config.ty.args().unwrap_or_default(),
-            config.apply_crossover,
-            config.mutation_rate.is_some(),
-            config.selection,
-        );
+        let _ = state.report_chan.send(Report::end(thread_id, key));
 
         let mut write_tasks = state.write_tasks.lock().unwrap();
         write_tasks.spawn_on(
             {
-                let key = config.to_key();
                 let file_limiter = Arc::clone(&state.file_limiter);
+                let report_chan = state.report_chan.clone();
                 async move {
                     write_graphs(file_limiter.as_ref(), key, graphs)
                         .await
                         .wrap_err_with(|| format!("Writing graphs of {key}"))
                         .unwrap();
-                    println!("Wrote graphs for {key}");
+                    let _ = report_chan.send(Report::wrote_graphs(key));
                 }
             },
             &state.runtime,
@@ -591,15 +591,18 @@ fn main() {
     //     optimal_specimen: Some(evaluation::pow2::optimal_specimen()),
     // }];
     let config_writer = runtime.block_on(create_config_writer()).unwrap();
+    let (tx, rx) = unbounded_channel();
     let program_state = ProgramState {
         file_limiter: Arc::new(tokio::sync::Semaphore::new(10)),
         config_writer: Arc::new(tokio::sync::Mutex::new(config_writer)),
         write_tasks: std::sync::Mutex::new(tokio::task::JoinSet::new()),
-        counter: AtomicUsize::new(0),
         len: config_10.len() + config_100.len(),
         runtime: runtime.handle().clone(),
+        report_chan: tx,
     };
     println!("Running {} configs", program_state.len);
+
+    let reporter_task = runtime.spawn(run_reports(program_state.len as u64, rx));
 
     rayon::scope(|s| {
         for config in config_10 {
@@ -619,9 +622,10 @@ fn main() {
     //     run_config(&program_state, config);
     // }
 
-    println!("Finished running all configs. Waiting for writes to complete...");
-
     runtime.block_on(async move {
+        drop(program_state.report_chan);
+        reporter_task.await.unwrap().unwrap();
+
         let b = async move {
             let mut write_tasks = program_state.write_tasks.into_inner().unwrap();
             while let Some(_) = write_tasks.join_next().await {}
