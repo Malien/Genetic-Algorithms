@@ -702,6 +702,7 @@ dependencies = [
  "indicatif",
  "num",
  "num-traits",
+ "once_cell",
  "plotters",
  "rand",
  "rayon",

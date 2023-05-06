@@ -43,8 +43,10 @@ use crate::{
 };
 
 // const MAX_GENERATIONS: usize = 10_000_000;
-const MAX_GENERATIONS: usize = 200_000;
+const MAX_GENERATIONS: usize = 10_000;
 const MAX_RUNS: usize = 100;
+const STALL_THRESHOLD: usize = 2_000;
+const MAX_FAILED_RUNS: usize = 5;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AlgoConfig<F: GenFamily + ?Sized>
@@ -80,16 +82,22 @@ where
 {
     config: &'a AlgoConfig<F>,
     rng: StdRng,
+    report_chan: &'a UnboundedSender<Report>,
 }
 
 impl<'a, F: FullFamily> RunState<'a, F>
 where
     [(); bitvec::mem::elts::<u16>(F::N)]:,
 {
-    fn new(config: &'a AlgoConfig<F>, run_idx: usize) -> Self {
+    fn new(
+        config: &'a AlgoConfig<F>,
+        report_chan: &'a UnboundedSender<Report>,
+        run_idx: usize,
+    ) -> Self {
         Self {
             config,
             rng: rand::SeedableRng::seed_from_u64(run_idx as u64),
+            report_chan,
         }
     }
 
@@ -103,6 +111,17 @@ where
                 .map(|_| random_genome::<{ F::N }>(&mut self.rng))
                 .collect(),
         }
+    }
+
+    fn report_stall(&self, progress: usize, out_of: usize) {
+        report(
+            Report::taking_too_long(
+                std::thread::current().id(),
+                self.config.to_key(),
+                (progress, out_of),
+            ),
+            &self.report_chan,
+        )
     }
 }
 
@@ -171,6 +190,7 @@ pub trait AlgoDescriptor {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct MaterializedDescriptor {
     category: &'static str,
     name: &'static str,
@@ -340,7 +360,10 @@ where
     let mut stats = StatEncoder::new(state.config);
     stats.record_population(&starting_population);
     let mut avg_fitness = avg_fitness(&starting_population);
-    for _ in 0..MAX_GENERATIONS {
+    for gen in 1..=MAX_GENERATIONS {
+        if gen % STALL_THRESHOLD == 0 {
+            state.report_stall(gen / STALL_THRESHOLD, MAX_GENERATIONS / STALL_THRESHOLD);
+        }
         let selection_result = selection(&mut state, starting_population);
         let (population, selection_stats) =
             SelectionStats::from_result(selection_result, avg_fitness);
@@ -368,7 +391,8 @@ where
     if state.config.mutation_rate.is_none() {
         return is_all_same(population.iter().map(|g| g.genome));
     }
-    return homougeneousness::<{ F::N }>(population.iter().map(|g| g.genome)) > HOMOUGENEOUSNESS_THRESHOLD;
+    return homougeneousness::<{ F::N }>(population.iter().map(|g| g.genome))
+        > HOMOUGENEOUSNESS_THRESHOLD;
 }
 
 fn is_all_same(iter: impl IntoIterator<Item = impl Eq>) -> bool {
@@ -483,12 +507,27 @@ where
     let key = config.to_key();
 
     report(Report::solving(thread_id, key), &state.report_chan);
-    let runs = (0..MAX_RUNS)
-        .map(|run_idx| {
-            let run_state = RunState::new(&config, run_idx);
-            simulation(run_state)
-        })
-        .collect();
+    let mut runs = Vec::with_capacity(MAX_RUNS);
+    let mut failed_runs = Some(0);
+    for run_idx in 0..MAX_RUNS {
+        let run_state = RunState::new(&config, &state.report_chan, run_idx);
+        let run = simulation(run_state);
+        let converged = run.converged();
+        runs.push(run);
+        match (&mut failed_runs, converged) {
+            (Some(failed_runs), false) if *failed_runs >= MAX_FAILED_RUNS => {
+                report(Report::cutting_short(key, *failed_runs), &state.report_chan);
+                break;
+            }
+            (Some(failed_runs), false) => {
+                *failed_runs += 1;
+            }
+            (Some(_), true) => {
+                failed_runs = None;
+            }
+            _ => {}
+        }
+    }
     let stats = Arc::new(ConfigStats::new(runs));
 
     let mut write_tasks = state.write_tasks.lock().unwrap();
@@ -574,11 +613,11 @@ fn main() {
 
     // let config_10: Vec<AlgoConfig<G10>> = vec![];
     // let config_100 = vec![AlgoConfig::<G100> {
-    //     ty: BinaryAlgo::FHD { sigma: 100.0.into() },
+    //     ty: BinaryAlgo::FConst,
     //     population_size: 100,
     //     apply_crossover: true,
     //     // mutation_rate: None,
-    //     mutation_rate: Some(0.00005),
+    //     mutation_rate: Some(0.0005),
     //     selection: Selection::StochasticTournament {
     //         prob: 1.0.into(),
     //         replacement: TournamentReplacement::With,

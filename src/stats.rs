@@ -55,6 +55,7 @@ pub struct RunStatsWithOptimum {
     pub best_fitness: N64,
     pub avg_fitness: N64,
     pub success: bool,
+    pub converged: bool,
     // iteration_count: usize, // is the same as iterations.len()
     pub min_selection_intensity: (usize, N64),
     pub max_selection_intensity: (usize, N64),
@@ -84,6 +85,7 @@ pub struct OptimumlessRunStats {
     // best_fitness: N64,
     // avg_fitness: N64,
     pub success: bool,
+    pub converged: bool,
     // iteration_count: usize, // is the same as iterations.len()
     pub min_rr: (usize, N64),
     pub max_rr: (usize, N64),
@@ -500,6 +502,16 @@ pub enum OptimumDisabiguity<With, Without> {
 
 pub type RunStats = OptimumDisabiguity<RunStatsWithOptimum, OptimumlessRunStats>;
 
+impl RunStats {
+    pub fn converged(&self) -> bool {
+        use OptimumDisabiguity::*;
+        match self {
+            WithOptimum(run) => run.converged,
+            Optimumless(run) => run.converged,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SelectionStats {
     rr: N64,
@@ -632,7 +644,7 @@ where
     ) -> RunStatsWithOptimum {
         let success =
             F::is_success_converged(&self.config, final_population, self.optimal_specimen);
-        self.finish(final_population, success)
+        self.finish(final_population, success, true)
     }
 
     pub fn finish_unconverged(
@@ -641,13 +653,14 @@ where
     ) -> RunStatsWithOptimum {
         let success =
             F::is_success_unconverged(self.config, final_population, self.optimal_specimen);
-        self.finish(final_population, success)
+        self.finish(final_population, success, false)
     }
 
     fn finish(
         self,
         final_population: &[EvaluatedGenome<{ F::N }>],
         success: bool,
+        converged: bool,
     ) -> RunStatsWithOptimum {
         let final_population_stats = PopulationStats {
             fitness: final_population.iter().map(|g| g.fitness).collect(),
@@ -675,6 +688,7 @@ where
                 .max()
                 .expect("Population is not empty"),
             avg_fitness: avg_fitness(&final_population),
+            converged,
             success,
             min_selection_intensity: iteration_min(&self.iterations, |i| i.selection_intensity),
             max_selection_intensity: iteration_max(&self.iterations, |i| i.selection_intensity),
@@ -873,7 +887,7 @@ impl OptimumlessStateEncoder {
     where
         [(); bitvec::mem::elts::<u16>(N)]:,
     {
-        self.finish(final_population, true)
+        self.finish(final_population, true, true)
     }
 
     pub fn finish_unconverged<const N: usize>(
@@ -883,25 +897,21 @@ impl OptimumlessStateEncoder {
     where
         [(); bitvec::mem::elts::<u16>(N)]:,
     {
-        self.finish(final_population, false)
+        self.finish(final_population, false, false)
     }
 
     fn finish<const N: usize>(
         self,
         final_population: &[EvaluatedGenome<N>],
         success: bool,
+        converged: bool,
     ) -> OptimumlessRunStats
     where
         [(); bitvec::mem::elts::<u16>(N)]:,
     {
         OptimumlessRunStats {
-            // best_fitness: final_population
-            //     .iter()
-            //     .map(|g| g.fitness)
-            //     .max()
-            //     .expect("Population is not empty"),
-            // avg_fitness: avg_fitness(&final_population),
             success,
+            converged,
             min_rr: iteration_min(&self.iterations, |i| i.rr),
             max_rr: iteration_max(&self.iterations, |i| i.rr),
             avg_rr: avg_by(&self.iterations, |i| i.rr),
