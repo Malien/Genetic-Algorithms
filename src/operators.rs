@@ -44,27 +44,18 @@ fn test_gene_crossover() {
     assert_eq!(&child2[..], &bitarr![u16, Lsb0; 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]);
 }
 
-pub fn mutation<F: FullFamily>(state: &mut RunState<F>, population: Vec<Genome<{F::N}>>) -> Vec<Genome<{F::N}>> 
+pub fn mutation<F: FullFamily>(state: &mut RunState<F>, mut population: Vec<Genome<{F::N}>>) -> Vec<Genome<{F::N}>> 
 where [(); bitvec::mem::elts::<u16>(F::N)]:
 {
-    if let Some(mutation_rate) = state.config.mutation_rate {
-        population
-            .into_iter()
-            .map(|genome| gene_mutation(genome, mutation_rate, &mut state.rng))
-            .collect()
-    } else {
-        population
-    }
-}
+    let Some(mutation_rate) = state.config.mutation_rate else { return population; };
 
-fn gene_mutation<const N: usize>(mut genome: Genome<N>, mutation_rate: f64, rng: &mut impl rand::Rng) -> Genome<N> 
-where [(); bitvec::mem::elts::<u16>(N)]:
-{
-    for i in 0..N {
-        if rng.gen_bool(mutation_rate) {
-            let gene = genome[i];
-            genome.set(i, !gene);
+    for genome in &mut population {
+        for i in 0..F::N {
+            if state.rng.gen_bool(mutation_rate) {
+                let gene = genome[i];
+                genome.set(i, !gene);
+            }
         }
     }
-    genome
+    return population;
 }

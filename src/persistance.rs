@@ -119,14 +119,15 @@ impl<T: AlgoDescriptor> std::fmt::Display for ConfigKey<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}/{}/{}/crossover={}/mutation={}/{}/{}",
+            "{}/{}/{}/crossover={}/mutation={}/{}/{}/{}",
+            self.population_size,
             self.algo_type.category(),
             self.algo_type.name(),
-            self.population_size,
             self.apply_crossover,
             self.apply_mutation,
             self.selection_name(),
             self.tournament_replacement(),
+            self.selection_prob(),
         )
     }
 }

@@ -11,6 +11,7 @@ use num_traits::real::Real;
 use crate::{
     avg_fitness,
     evaluation::{evaluate_phenotype, EvaluateFamily},
+    selection::SelectionResult,
     AlgoConfig, EvaluatedGenome, GenFamily, Genome, G10, G100,
 };
 
@@ -499,6 +500,51 @@ pub enum OptimumDisabiguity<With, Without> {
 
 pub type RunStats = OptimumDisabiguity<RunStatsWithOptimum, OptimumlessRunStats>;
 
+#[derive(Debug, Clone, Copy)]
+pub struct SelectionStats {
+    rr: N64,
+    theta: N64,
+    selection_diff: N64,
+    selection_intensity: N64,
+}
+
+impl SelectionStats {
+    pub fn from_result<const N: usize>(
+        selection_result: SelectionResult<N>,
+        pre_selection_fitness: N64,
+    ) -> (Vec<EvaluatedGenome<N>>, SelectionStats)
+    where
+        [(); bitvec::mem::elts::<u16>(N)]:,
+    {
+        let population = selection_result.new_population;
+        let unique_specimens_selected =
+            N64::from_usize(selection_result.unique_specimens_selected).unwrap();
+        let population_size = N64::from_usize(population.len()).unwrap();
+
+        let avg_fitness = avg_fitness(&population);
+        let std_dev = std_dev_by(&population, |g| g.fitness);
+
+        let selection_intensity = if std_dev == N64::from(0.0) {
+            1.0.into()
+        } else {
+            (avg_fitness - pre_selection_fitness) / std_dev
+        };
+        let rr = unique_specimens_selected / population_size;
+        let theta = (population_size - unique_specimens_selected) / population_size;
+        let selection_diff = avg_fitness - pre_selection_fitness;
+
+        (
+            population,
+            SelectionStats {
+                selection_intensity,
+                selection_diff,
+                rr,
+                theta,
+            },
+        )
+    }
+}
+
 pub type StatEncoder<'a, F> =
     OptimumDisabiguity<StateEncoderWithOptimum<'a, F>, OptimumlessStateEncoder>;
 
@@ -519,21 +565,13 @@ where
 {
     pub fn record_run_stat(
         &mut self,
-        pre_selection_fitness: N64,
         population: &[EvaluatedGenome<{ F::N }>],
-        unique_specimens_selected: usize,
+        selection_stats: SelectionStats,
     ) -> N64 {
-        let optimal_specimen_count = self
-            .config
-            .optimal_specimen
-            .as_ref()
-            .map(|optimal_specimen| {
-                population
-                    .iter()
-                    .filter(|genome| &genome.genome == optimal_specimen)
-                    .count()
-            })
-            .unwrap_or(0);
+        let optimal_specimen_count = population
+            .iter()
+            .filter(|genome| genome.genome == self.optimal_specimen)
+            .count();
         let population_size = N64::from_usize(population.len()).unwrap();
         let avg_fitness = avg_fitness(population);
         let std_dev = population
@@ -542,12 +580,6 @@ where
             .sum::<N64>()
             / population_size;
 
-        let selection_intensity = if std_dev == N64::from(0.0) {
-            1.0.into()
-        } else {
-            (avg_fitness - pre_selection_fitness) / std_dev
-        };
-        let unique_specimens_selected = N64::from_usize(unique_specimens_selected).unwrap();
         let growth_rate =
             if self.prev_iteration_optimal_specimens != 0 && optimal_specimen_count != 0 {
                 N64::from_usize(optimal_specimen_count).unwrap()
@@ -557,8 +589,8 @@ where
             };
 
         self.iterations.push(IterationStats {
-            selection_intensity,
-            selection_diff: avg_fitness - pre_selection_fitness,
+            selection_intensity: selection_stats.selection_intensity,
+            selection_diff: selection_stats.selection_diff,
             growth_rate,
             optimal_specimen_count,
             avg_fitness,
@@ -568,11 +600,30 @@ where
                 .max()
                 .expect("At least one iteration to be recorded"),
             fitness_std_dev: std_dev,
-            rr: unique_specimens_selected / population_size,
-            theta: (population_size - unique_specimens_selected) / population_size,
+            rr: selection_stats.rr,
+            theta: selection_stats.theta,
         });
         self.prev_iteration_optimal_specimens = optimal_specimen_count;
         return avg_fitness;
+    }
+
+    pub fn record_population(&mut self, population: &[EvaluatedGenome<{ F::N }>]) {
+        if self.populations.is_full() {
+            return;
+        }
+        self.populations.push(PopulationStats {
+            fitness: population.iter().map(|g| g.fitness).collect(),
+            ones_count: population.iter().map(|g| g.genome.count_ones()).collect(),
+            phenotype: if F::has_phenotype() {
+                Some(
+                    population
+                        .iter()
+                        .map(|g| F::decode_phenotype(g.genome, self.config.ty)
+                        .expect("if EvaluateFamily::has_phenotype is true, every possible genome has associated phenotype"))
+                        .collect(),
+                )
+            } else { None },
+        });
     }
 
     pub fn finish_converged(
@@ -658,24 +709,6 @@ where
         }
     }
 
-    pub fn record_population(&mut self, population: &[EvaluatedGenome<{ F::N }>]) {
-        if self.populations.is_full() {
-            return;
-        }
-        self.populations.push(PopulationStats {
-            fitness: population.iter().map(|g| g.fitness).collect(),
-            ones_count: population.iter().map(|g| g.genome.count_ones()).collect(),
-            phenotype: if F::has_phenotype() {
-                Some(
-                    population
-                        .iter()
-                        .map(|g| F::decode_phenotype(g.genome, self.config.ty)
-                        .expect("if EvaluateFamily::has_phenotype is true, every possible genome has associated phenotype"))
-                        .collect(),
-                )
-            } else { None },
-        });
-    }
 }
 
 fn iteration_min<U, T: Ord + Copy>(items: &[U], selector: impl Fn(&U) -> T) -> (usize, T) {
@@ -797,19 +830,15 @@ pub struct OptimumlessStateEncoder {
 impl OptimumlessStateEncoder {
     pub fn record_run_stat<const N: usize>(
         &mut self,
-        _pre_selection_fitness: N64,
         population: &[EvaluatedGenome<N>],
-        unique_specimens_selected: usize,
+        selection_stats: SelectionStats,
     ) -> N64
     where
         [(); bitvec::mem::elts::<u16>(N)]:,
     {
-        let population_size = N64::from_usize(population.len()).unwrap();
-        let unique_specimens_selected = N64::from_usize(unique_specimens_selected).unwrap();
         let avg_fitness = avg_fitness(population);
 
         self.iterations.push(OptimumlessIterationStats {
-            // selection_diff: avg_fitness - pre_selection_fitness,
             avg_fitness,
             best_fitness: population
                 .iter()
@@ -817,8 +846,8 @@ impl OptimumlessStateEncoder {
                 .max()
                 .expect("At least one iteration to be recorded"),
             fitness_std_dev: std_dev_by(population, |genome| genome.fitness),
-            rr: unique_specimens_selected / population_size,
-            theta: (population_size - unique_specimens_selected) / population_size,
+            rr: selection_stats.rr,
+            theta: selection_stats.theta,
         });
         return avg_fitness;
     }
@@ -884,9 +913,12 @@ impl OptimumlessStateEncoder {
             starting_population: self.populations,
             final_population: PopulationStats {
                 fitness: final_population.iter().map(|g| g.fitness).collect(),
-                ones_count: final_population.iter().map(|g| g.genome.count_ones()).collect(),
-                phenotype: None
-            }, 
+                ones_count: final_population
+                    .iter()
+                    .map(|g| g.genome.count_ones())
+                    .collect(),
+                phenotype: None,
+            },
         }
     }
 }
@@ -913,17 +945,12 @@ where
 
     pub fn record_run_stat(
         &mut self,
-        pre_selection_fitness: N64,
         population: &[EvaluatedGenome<{ F::N }>],
-        unique_specimens_selected: usize,
+        selection_stats: SelectionStats,
     ) -> N64 {
         match self {
-            Self::WithOptimum(stats) => {
-                stats.record_run_stat(pre_selection_fitness, population, unique_specimens_selected)
-            }
-            Self::Optimumless(stats) => {
-                stats.record_run_stat(pre_selection_fitness, population, unique_specimens_selected)
-            }
+            Self::WithOptimum(stats) => stats.record_run_stat(population, selection_stats),
+            Self::Optimumless(stats) => stats.record_run_stat(population, selection_stats),
         }
     }
 

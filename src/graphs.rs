@@ -6,7 +6,7 @@ use plotters::{
     chart::ChartBuilder,
     coord::{combinators::IntoLinspace, Shift},
     drawing::IntoDrawingArea,
-    prelude::PathElement,
+    prelude::{PathElement, IntoSegmentedCoord},
     series::{Histogram, LineSeries},
     style::{colors, Color, IntoFont},
 };
@@ -71,16 +71,15 @@ fn graph_image(configure: impl FnOnce(&DrawingArea) -> eyre::Result<()>) -> eyre
     Ok(encoded_buf)
 }
 
-fn population_ones_count_graph(one_counts: &[usize]) -> eyre::Result<Vec<u8>> {
-    let max = one_counts.iter().max().unwrap();
-    let bucket_count = hist_ceiling_usize((0, *max), one_counts);
+fn population_ones_count_graph(genome_size: usize, one_counts: &[usize]) -> eyre::Result<Vec<u8>> {
+    let ceil = hist_ceiling_usize((0, genome_size), one_counts);
     graph_image(|root| {
         let mut chart = ChartBuilder::on(&root)
             .caption("Amount of ones in genome", ("sans-serif", 50).into_font())
             .margin(5)
             .x_label_area_size(30)
             .y_label_area_size(20)
-            .build_cartesian_2d(0..max + 1, 0..bucket_count)?;
+            .build_cartesian_2d((0..genome_size).into_segmented(), 0..ceil)?;
 
         chart.configure_mesh().draw()?;
 
@@ -298,6 +297,7 @@ impl Bounds {
 pub trait GraphDescriptor {
     fn phenotype_bounds(&self) -> Option<Bounds>;
     fn fitness_bounds(&self) -> Option<Bounds>;
+    fn genome_size(&self) -> usize;
 }
 
 impl GraphDescriptor for (PheonotypeAlgo, GenomeEncoding) {
@@ -307,12 +307,14 @@ impl GraphDescriptor for (PheonotypeAlgo, GenomeEncoding) {
             PheonotypeAlgo::Pow2 => Bounds::new(-5.12, 5.12, 0.5),
         })
     }
-
     fn fitness_bounds(&self) -> Option<Bounds> {
         Some(match self.0 {
             PheonotypeAlgo::Pow1 => Bounds::new(0.0, 10.23.powi(2), 5.0),
             PheonotypeAlgo::Pow2 => Bounds::new(0.0, 5.12.powi(2), 2.0),
         })
+    }
+    fn genome_size(&self) -> usize {
+        10
     }
 }
 
@@ -326,6 +328,9 @@ impl GraphDescriptor for BinaryAlgo {
             BinaryAlgo::FConst => None,
         }
     }
+    fn genome_size(&self) -> usize {
+        100
+    }
 }
 
 pub fn draw_population_graphs(
@@ -335,7 +340,7 @@ pub fn draw_population_graphs(
     let phenotype_bounds = descriptor.phenotype_bounds();
     let fitness_bounds = descriptor.fitness_bounds();
 
-    let ones_count = population_ones_count_graph(&population.ones_count)?;
+    let ones_count = population_ones_count_graph(descriptor.genome_size(), &population.ones_count)?;
     let phenotype = match (phenotype_bounds, &population.phenotype) {
         (Some(bounds), Some(phenotypes)) => Some(population_phenotype_graph(bounds, phenotypes)?),
         _ => None,

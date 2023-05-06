@@ -2,12 +2,13 @@ use std::{
     collections::{hash_map::Entry, HashMap},
     thread::ThreadId,
     time::Duration,
+    sync::atomic::Ordering,
 };
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::{persistance::ConfigKey, AlgoDescriptor, MaterializedDescriptor};
+use crate::{persistance::ConfigKey, AlgoDescriptor, MaterializedDescriptor, VERBOSE, SILENT};
 
 pub struct Report {
     kind: ReportKind,
@@ -85,7 +86,18 @@ struct ThreadState {
     bar: ProgressBar,
 }
 
+pub fn report(report: Report, tx: &UnboundedSender<Report>) {
+    if SILENT.load(Ordering::Relaxed) {
+        return;
+    }
+    let _ = tx.send(report);
+}
+
 pub async fn run_reports(config_len: u64, mut rx: UnboundedReceiver<Report>) -> eyre::Result<()> {
+    if SILENT.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    
     let bar_style =
         ProgressStyle::with_template("{prefix:12}: [{bar:40.cyan/blue}] {pos:>7}/{len:7} {msg}")?;
     let spinner_style = ProgressStyle::with_template("{prefix:12}: {spinner} {msg}")?;
@@ -116,6 +128,7 @@ pub async fn run_reports(config_len: u64, mut rx: UnboundedReceiver<Report>) -> 
     let mut graphed = 0;
     let mut wrote_tables = 0;
     let mut wrote_graphs = 0;
+    let verbose = VERBOSE.load(Ordering::Relaxed);
 
     let mut thread_statuses = HashMap::<ThreadId, ThreadState>::new();
 
@@ -149,23 +162,31 @@ pub async fn run_reports(config_len: u64, mut rx: UnboundedReceiver<Report>) -> 
                 solved += 1;
                 update_thread(thread, ThreadStatus::Graphing, format!("Graphing: {key}"));
                 solve_bar.set_position(solved);
-                multibar.println(format!("Solved: {key}"))?;
+                if verbose {
+                    multibar.println(format!("Solved: {key}"))?;
+                }
             }
             End(thread) => {
                 graphed += 1;
                 update_thread(thread, ThreadStatus::Stalled, format!("Stalled"));
                 graph_bar.set_position(graphed);
-                multibar.println(format!("Graphed: {key}"))?;
+                if verbose {
+                    multibar.println(format!("Graphed: {key}"))?;
+                }
             }
             WroteTables => {
                 wrote_tables += 1;
                 write_table_bar.set_position(wrote_tables);
-                multibar.println(format!("Wrote tables: {key}"))?;
+                if verbose {
+                    multibar.println(format!("Wrote tables: {key}"))?;
+                }
             }
             WroteGraphs => {
                 wrote_graphs += 1;
                 write_graph_bar.set_position(wrote_graphs);
-                multibar.println(format!("Wrote graphs: {key}"))?;
+                if verbose {
+                    multibar.println(format!("Wrote graphs: {key}"))?;
+                }
             }
         }
     }
