@@ -8,9 +8,8 @@ where [(); bitvec::mem::elts::<u16>(F::N)]:
     if !state.config.apply_crossover {
         return population.into_iter().map(|genome| genome.genome).collect();
     }
-    if population.len() % 2 != 0 {
-        panic!("Population size must be even for crossover");
-    }
+    assert!(population.len() % 2 == 0, "Population size must be even for crossover");
+
     population.shuffle(&mut state.rng);
     population
         .into_iter()

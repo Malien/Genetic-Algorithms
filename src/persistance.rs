@@ -1,10 +1,12 @@
 use std::{
+    collections::HashMap,
     io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
-use futures::{future::try_join, try_join};
-use tokio::io::AsyncWriteExt;
+use futures::{future::{try_join, try_join_all}, try_join};
+use tokio::{io::AsyncWriteExt, sync::Mutex};
 
 use crate::{
     graphs::{GraphDescriptor, RunGraphs},
@@ -36,8 +38,7 @@ impl<T: AlgoDescriptor> ConfigKey<T> {
         path.push("tables");
         path.push(self.algo_type.category());
         path.push(self.algo_type.name());
-        self.append_genops_path(&mut path);
-        self.append_selection_path(&mut path);
+        self.append_common_path(&mut path);
 
         path
     }
@@ -49,34 +50,12 @@ impl<T: AlgoDescriptor> ConfigKey<T> {
         path.push(format!("{}", self.population_size));
         path.push(format!("graphs-{}", self.algo_type.category()));
         path.push(self.algo_type.name());
-        self.append_genops_path(&mut path);
-        self.append_selection_path(&mut path);
+        self.append_common_path(&mut path);
 
         path
     }
 
-    fn append_selection_path(&self, path: &mut PathBuf) {
-        match self.selection {
-            Selection::StochasticTournament {
-                prob,
-                replacement: TournamentReplacement::With,
-            } => {
-                path.push("stochastic-tournament");
-                path.push("with-replacement");
-                path.push(format!("{:.1}", prob));
-            }
-            Selection::StochasticTournament {
-                prob,
-                replacement: TournamentReplacement::Without,
-            } => {
-                path.push("stochastic-tournament");
-                path.push("without-replacement");
-                path.push(format!("{:.1}", prob));
-            }
-        };
-    }
-
-    fn append_genops_path(&self, path: &mut PathBuf) {
+    fn append_common_path(&self, path: &mut PathBuf) {
         path.push(if self.apply_crossover {
             "crossover"
         } else {
@@ -87,11 +66,14 @@ impl<T: AlgoDescriptor> ConfigKey<T> {
         } else {
             "no-mutation"
         });
+        path.push(self.selection_name());
+        path.push(self.tournament_replacement());
+        path.push(self.selection_prob());
     }
 
     fn selection_name(&self) -> &'static str {
         match self.selection {
-            Selection::StochasticTournament { .. } => "stochastic-tournament",
+            Selection::StochasticTournament { .. } => "probabilistic-tournament",
         }
     }
 
@@ -100,11 +82,11 @@ impl<T: AlgoDescriptor> ConfigKey<T> {
             Selection::StochasticTournament {
                 replacement: TournamentReplacement::With,
                 ..
-            } => "with",
+            } => "with-replacement",
             Selection::StochasticTournament {
                 replacement: TournamentReplacement::Without,
                 ..
-            } => "without",
+            } => "without-replacement",
         }
     }
 
@@ -132,9 +114,23 @@ impl<T: AlgoDescriptor> std::fmt::Display for ConfigKey<T> {
     }
 }
 
-pub async fn create_config_writer() -> io::Result<CSVFile> {
-    tokio::fs::create_dir_all("data").await?;
-    let file = tokio::fs::File::create("data/stats.csv").await?;
+pub async fn create_multi_config_writer(
+    population_sizes: impl IntoIterator<Item = usize>,
+) -> io::Result<HashMap<usize, Arc<Mutex<CSVFile>>>> {
+    let res = try_join_all(population_sizes.into_iter().map(|size| async move {
+        let mut path = PathBuf::from("data");
+        path.push(format!("{size}"));
+        tokio::fs::create_dir_all(&path).await?;
+        path.push("stats.csv");
+        let writer = create_config_writer(&path).await?;
+        io::Result::Ok((size, Arc::new(Mutex::new(writer))))
+    })).await?;
+
+    Ok(res.into_iter().collect())
+}
+
+pub async fn create_config_writer(path: &Path) -> io::Result<CSVFile> {
+    let file = tokio::fs::File::create(path).await?;
     let mut writer = csv_async::AsyncWriterBuilder::new()
         .buffer_capacity(256 * 1024)
         .delimiter(b';')
@@ -866,7 +862,7 @@ pub async fn write_graphs(
 ) -> io::Result<()> {
     let path = key.to_graphs_path();
 
-    for (idx, run) in graphs.into_iter().enumerate() {
+    for (run, idx) in graphs.into_iter().zip(1..) {
         let path = path.join(format!("{idx}"));
         tokio::fs::create_dir_all(&path).await?;
 

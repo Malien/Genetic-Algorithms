@@ -86,7 +86,7 @@ fn population_ones_count_graph(genome_size: usize, one_counts: &[usize]) -> eyre
         chart.draw_series(
             Histogram::vertical(&chart)
                 .style(colors::BLUE.filled())
-                .margin(10)
+                .margin(2)
                 .data(one_counts.iter().map(|&count| (count, 1))),
         )?;
 
@@ -121,7 +121,7 @@ fn population_phenotype_graph(bounds: Bounds, phenotypes: &[N64]) -> eyre::Resul
             .x_label_area_size(30)
             .y_label_area_size(20)
             .build_cartesian_2d(
-                (bounds.min_f()..bounds.max_f())
+                (bounds.min_f()..bounds.max_f() + bounds.step)
                     .step(bounds.step)
                     .use_round(),
                 0..hist_ceiling(bounds, phenotypes),
@@ -379,18 +379,17 @@ pub fn draw_optimumless_run_graphs(
 
     let final_population = draw_population_graphs(descriptor, &run.final_population)?;
 
-    let avg_fitness = run.iterations.iter().map(|i| i.avg_fitness);
-    let avg_fitness = rewrap!(minmax_iter(avg_fitness.clone()), |bounds| {
-        just_plot_floats("Fitness", bounds, avg_fitness)?
+    let bounds = descriptor.fitness_bounds();
+    let avg_fitness = rewrap!(bounds, |Bounds { min, max, .. }| {
+        just_plot_floats("Fitness", (min, max), run.iterations.iter().map(|i| i.avg_fitness))?
     });
 
-    let best_fitness = run.iterations.iter().map(|i| i.best_fitness);
-    let best_fitness = rewrap!(minmax_iter(best_fitness.clone()), |bounds| {
-        just_plot_floats("Best fitness", bounds, best_fitness)?
+    let best_fitness = rewrap!(bounds, |Bounds { min, max, .. }| {
+        just_plot_floats("Best fitness", (min, max), run.iterations.iter().map(|i| i.best_fitness))?
     });
 
-    let fitness_std_dev: Vec<N64> = run.iterations.iter().map(|i| i.fitness_std_dev).collect();
-    let fitness_std_dev = rewrap!(minmax_iter(&fitness_std_dev), |(&min, &max)| {
+    let fitness_std_dev = run.iterations.iter().map(|i| i.fitness_std_dev);
+    let fitness_std_dev = rewrap!(bounds.and(minmax_iter(fitness_std_dev.clone())), |(min, max)| {
         just_plot_floats("Fitness standard deviation", (min, max), fitness_std_dev)?
     });
 
@@ -427,14 +426,14 @@ pub fn draw_run_with_optimum_graphs(
 
     let final_population = draw_population_graphs(descriptor, &run.final_population)?;
 
-    let avg_fitness = run.iterations.iter().map(|i| i.avg_fitness);
-    let avg_fitness = rewrap!(minmax_iter(avg_fitness.clone()), |bounds| {
-        just_plot_floats("Fitness", bounds, avg_fitness)?
+    let fitness_bounds = descriptor.fitness_bounds();
+
+    let avg_fitness = rewrap!(fitness_bounds, |Bounds { min, max, .. }| {
+        just_plot_floats("Fitness", (min, max), run.iterations.iter().map(|i| i.avg_fitness))?
     });
 
-    let best_fitness = run.iterations.iter().map(|i| i.best_fitness);
-    let best_fitness = rewrap!(minmax_iter(best_fitness.clone()), |bounds| {
-        just_plot_floats("Best fitness", bounds, best_fitness)?
+    let best_fitness = rewrap!(fitness_bounds, |Bounds { min, max, .. }| {
+        just_plot_floats("Best fitness", (min, max), run.iterations.iter().map(|i| i.best_fitness))?
     });
 
     let fitness_std_dev = run.iterations.iter().map(|i| i.fitness_std_dev);
@@ -447,7 +446,7 @@ pub fn draw_run_with_optimum_graphs(
         just_plot_ints("Optimal specimen count", bounds, optimal_specimen_count)?
     });
 
-    let growth_rate = run.iterations.iter().map(|i| i.growth_rate);
+    let growth_rate = run.iterations.iter().map(|i| i.growth_rate).skip(1);
     let growth_rate = rewrap!(minmax_iter(growth_rate.clone()), |bounds| {
         just_plot_floats("Growth rate", bounds, growth_rate)?
     });

@@ -722,7 +722,6 @@ where
             final_population: final_population_stats,
         }
     }
-
 }
 
 fn iteration_min<U, T: Ord + Copy>(items: &[U], selector: impl Fn(&U) -> T) -> (usize, T) {

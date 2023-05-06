@@ -51,7 +51,10 @@ impl EvaluateFamily for G10 {
         fitness(decode_phenotype(decode_genome(genome)))
     }
 
-    fn decode_phenotype(genome: Genome<{ Self::N }>, (algo, encoding): Self::AlgoType) -> Option<N64>
+    fn decode_phenotype(
+        genome: Genome<{ Self::N }>,
+        (algo, encoding): Self::AlgoType,
+    ) -> Option<N64>
     where
         [(); bitvec::mem::elts::<u16>(Self::N)]:,
     {
@@ -226,12 +229,12 @@ impl fmt::Display for PheonotypeAlgo {
 
 pub mod fhd {
     use super::Genome;
-    use bitvec::{bitarr, order::Lsb0};
+    use bitvec::array::BitArray;
     use decorum::N64;
     use num::FromPrimitive;
 
     pub fn optimal_specimen() -> Genome<100> {
-        Genome::new(bitarr![u16, Lsb0; 0; 100])
+        Genome::new(BitArray::new([0, 0, 0, 0, 0, 0, 0]))
     }
 
     pub fn fitness(sigma: N64, genome: Genome<100>) -> N64 {
@@ -243,12 +246,13 @@ pub mod fhd {
 
 pub mod pow1 {
     use super::Genome;
-    use bitvec::{bitarr, order::Lsb0, prelude::BitArray};
+    use bitvec::prelude::BitArray;
     use decorum::{Real, N64};
     use num::FromPrimitive;
 
     pub fn optimal_specimen() -> Genome<10> {
-        Genome::new(bitarr![u16, Lsb0; 1; 10])
+        let genome = 0b0000001111111111;
+        Genome::new(BitArray::new([genome]))
     }
 
     #[allow(dead_code)]
@@ -297,14 +301,15 @@ pub mod pow1 {
 }
 
 pub mod pow2 {
-    use bitvec::{bitarr, order::Lsb0, prelude::BitArray};
+    use bitvec::prelude::BitArray;
     use decorum::N64;
     use num::FromPrimitive;
 
     use crate::Genome;
 
     pub fn optimal_specimen() -> Genome<10> {
-        Genome::new(bitarr![u16, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1, 1, 0])
+        let genome = 0b0000000111111111;
+        Genome::new(BitArray::new([genome]))
     }
 
     #[allow(dead_code)]

@@ -179,6 +179,7 @@ pub async fn run_reports(config_len: u64, mut rx: UnboundedReceiver<Report>) -> 
     let mut wrote_tables = 0;
     let mut wrote_graphs = 0;
     let verbose = VERBOSE.load(Ordering::Relaxed);
+    let mut non_converging = vec![];
 
     let mut thread_statuses = HashMap::<ThreadId, ThreadState>::new();
 
@@ -243,10 +244,14 @@ pub async fn run_reports(config_len: u64, mut rx: UnboundedReceiver<Report>) -> 
                     multibar.println(format!("Graphed: {key}"))?;
                 }
             }
-            CuttingShort { failed_runs } if verbose => {
-                multibar.println(format!("First {failed_runs} didn't converge. Skipping {key}"))?;
+            CuttingShort { failed_runs } => {
+                non_converging.push(key);
+                if verbose {
+                    multibar.println(format!(
+                        "First {failed_runs} didn't converge. Skipping {key}"
+                    ))?;
+                }
             }
-            CuttingShort { .. } => {}
             WroteTables => {
                 wrote_tables += 1;
                 write_table_bar.set_position(wrote_tables);
@@ -261,6 +266,16 @@ pub async fn run_reports(config_len: u64, mut rx: UnboundedReceiver<Report>) -> 
                     multibar.println(format!("Wrote graphs: {key}"))?;
                 }
             }
+        }
+    }
+
+    drop(multibar);
+    if non_converging.is_empty() {
+        println!("All runs converged");
+    } else {
+        eprintln!("{} runs didn't converge:", non_converging.len());
+        for key in non_converging {
+            eprintln!("\t{key}");
         }
     }
 

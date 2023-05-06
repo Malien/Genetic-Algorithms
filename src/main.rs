@@ -2,6 +2,7 @@
 #![feature(generic_const_exprs)]
 #![feature(type_changing_struct_update)]
 use std::{
+    collections::HashMap,
     ops::{Deref, DerefMut},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -38,7 +39,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 use crate::{
     graphs::draw_graphs,
-    persistance::{append_config, create_config_writer, write_graphs},
+    persistance::{append_config, create_multi_config_writer, write_graphs},
     reports::run_reports,
 };
 
@@ -46,7 +47,7 @@ use crate::{
 const MAX_GENERATIONS: usize = 10_000;
 const MAX_RUNS: usize = 100;
 const STALL_THRESHOLD: usize = 2_000;
-const MAX_FAILED_RUNS: usize = 5;
+const MAX_FAILED_RUNS: usize = 10;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AlgoConfig<F: GenFamily + ?Sized>
@@ -361,15 +362,15 @@ where
     stats.record_population(&starting_population);
     let mut avg_fitness = avg_fitness(&starting_population);
     for gen in 1..=MAX_GENERATIONS {
+        if is_convergant(&state, &starting_population) {
+            return stats.finish_converged(&starting_population);
+        }
         if gen % STALL_THRESHOLD == 0 {
             state.report_stall(gen / STALL_THRESHOLD, MAX_GENERATIONS / STALL_THRESHOLD);
         }
         let selection_result = selection(&mut state, starting_population);
         let (population, selection_stats) =
             SelectionStats::from_result(selection_result, avg_fitness);
-        if is_convergant(&state, &population) {
-            return stats.finish_converged(&population);
-        }
 
         let population = crossover(&mut state, population);
         let population = mutation(&mut state, population);
@@ -415,18 +416,19 @@ macro_rules! perms {
     };
 }
 
+const POPULATION_SIZES: [usize; 6] = [100, 200, 300, 400, 500, 1000];
+const MUTATION_MODIFIERS: [f64; 6] = [1.0, 2.0, 3.0, 4.0, 5.0, 10.0];
+const G10_BASE_MUTATION_RATE: f64 = 0.0001;
+const G100_BASE_MUTATION_RATE: f64 = 0.00001;
+
 fn config_permutations_100() -> Vec<AlgoConfig<G100>> {
     let mut res = vec![];
 
     perms! {
-        (population_size, mutation_rate) in [
-            (100, 0.0005),
-            // (200, 0.0005 / 2.0),
-            // (300, 0.0005 / 3.0),
-            // (400, 0.0005 / 4.0),
-            // (500, 0.0005 / 5.0),
-            // (1000, 0.0005 / 10.0),
-        ];
+        (population_size, mutation_rate) in POPULATION_SIZES
+            .into_iter()
+            .zip(MUTATION_MODIFIERS.into_iter().map(|x| x * G100_BASE_MUTATION_RATE))
+            .rev();
         apply_crossover in [true, false];
         apply_mutation in [true, false];
         selection_prob in [1.0, 0.8, 0.7, 0.6];
@@ -454,14 +456,10 @@ fn config_permutations_10() -> Vec<AlgoConfig<G10>> {
     let mut res = vec![];
 
     perms! {
-        (population_size, mutation_rate) in [
-            (100, 0.00001),
-            // (200, 0.00001 / 2.0),
-            // (300, 0.00001 / 3.0),
-            // (400, 0.00001 / 4.0),
-            // (500, 0.00001 / 5.0),
-            // (1000, 0.00001 / 10.0)
-        ];
+        (population_size, mutation_rate) in POPULATION_SIZES
+            .into_iter()
+            .zip(MUTATION_MODIFIERS.into_iter().map(|x| x * G10_BASE_MUTATION_RATE))
+            .rev();
         apply_crossover in [true, false];
         apply_mutation in [true, false];
         selection_prob in [1.0, 0.8, 0.7, 0.6];
@@ -492,7 +490,7 @@ fn config_permutations_10() -> Vec<AlgoConfig<G10>> {
 struct ProgramState {
     file_limiter: Arc<tokio::sync::Semaphore>,
     runtime: tokio::runtime::Handle,
-    config_writer: Arc<tokio::sync::Mutex<CSVFile>>,
+    config_writers: HashMap<usize, Arc<tokio::sync::Mutex<CSVFile>>>,
     write_tasks: std::sync::Mutex<tokio::task::JoinSet<()>>,
     len: usize,
     report_chan: UnboundedSender<Report>,
@@ -550,7 +548,7 @@ where
     write_tasks.spawn_on(
         {
             let stats = Arc::clone(&stats);
-            let config_writer = Arc::clone(&state.config_writer);
+            let config_writer = Arc::clone(&state.config_writers[&config.population_size]);
             async move {
                 let mut writer = config_writer.lock().await;
                 append_config(writer.deref_mut(), key, stats.as_ref())
@@ -627,22 +625,24 @@ fn main() {
 
     // let config_100: Vec<AlgoConfig<G100>> = vec![];
     // let config_10 = vec![AlgoConfig::<G10> {
-    //     ty: (PheonotypeAlgo::Pow2, GenomeEncoding::Binary),
+    //     ty: (PheonotypeAlgo::Pow1, GenomeEncoding::Binary),
     //     population_size: 100,
-    //     apply_crossover: true,
-    //     mutation_rate: Some(0.0005),
+    //     apply_crossover: false,
+    //     mutation_rate: Some(0.0001),
     //     selection: Selection::StochasticTournament {
     //         prob: 1.0.into(),
     //         replacement: TournamentReplacement::With,
     //     },
-    //     optimal_specimen: Some(evaluation::pow2::optimal_specimen()),
+    //     optimal_specimen: Some(evaluation::pow1::optimal_specimen()),
     // }];
 
-    let config_writer = runtime.block_on(create_config_writer()).unwrap();
+    let config_writers = runtime
+        .block_on(create_multi_config_writer(POPULATION_SIZES))
+        .unwrap();
     let (tx, rx) = unbounded_channel();
     let program_state = ProgramState {
         file_limiter: Arc::new(tokio::sync::Semaphore::new(10)),
-        config_writer: Arc::new(tokio::sync::Mutex::new(config_writer)),
+        config_writers,
         write_tasks: std::sync::Mutex::new(tokio::task::JoinSet::new()),
         len: config_10.len() + config_100.len(),
         runtime: runtime.handle().clone(),
@@ -679,8 +679,10 @@ fn main() {
             while let Some(_) = write_tasks.join_next().await {}
         };
         let a = async move {
-            let mut config_writer = wait_for_arc(program_state.config_writer).await.into_inner();
-            config_writer.flush().await.unwrap();
+            for config_writer in program_state.config_writers.into_values() {
+                let mut config_writer = wait_for_arc(config_writer).await.into_inner();
+                config_writer.flush().await.unwrap();
+            }
         };
         futures::future::join(a, b).await;
     });
