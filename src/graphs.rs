@@ -457,8 +457,8 @@ pub fn draw_run_with_optimum_graphs(
         plot_double(bounds, (rr, "RR"), (theta, "Theta"))?
     });
 
-    let selection_intensity = run.iterations.iter().map(|i| i.selection_intensity);
-    let selection_diff = run.iterations.iter().map(|i| i.selection_diff);
+    let selection_intensity = run.iterations.iter().map(|i| i.selection_intensity).take(run.iterations.len() - 1);
+    let selection_diff = run.iterations.iter().map(|i| i.selection_diff).take(run.iterations.len() - 1);
     let selection_intensity_and_diff = rewrap!(
         minmax_iter(selection_intensity.clone().chain(selection_diff.clone())),
         |bounds| {

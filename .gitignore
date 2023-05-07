@@ -3,3 +3,4 @@
 /data
 /.luarc.json
 /.nvimrc.lua
+*.docx

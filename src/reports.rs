@@ -127,13 +127,13 @@ struct ThreadState {
 
 static THREAD_BAR_STYLE: Lazy<ProgressStyle> = Lazy::new(|| {
     ProgressStyle::default_spinner()
-        .template("{prefix:12}: {spinner} {msg:<100}")
+        .template("{prefix:12}: {spinner} {msg:<120}")
         .unwrap()
 });
 
 static THREAD_STALLED_BAR_STYLE: Lazy<ProgressStyle> = Lazy::new(|| {
     ProgressStyle::default_spinner()
-        .template("{prefix:12}: {spinner} {msg:<100} ⏳[{bar:5.red/black}]")
+        .template("{prefix:12}: {spinner} {msg:<120} ⏳[{bar:5.red/black}]")
         .unwrap()
 });
 
