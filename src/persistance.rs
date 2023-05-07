@@ -507,6 +507,7 @@ async fn write_optimumless(
 
         writer
             .write_record([
+                "run_no",
                 "iteration_count",
                 "success",
                 "min_rr_idx",
@@ -522,9 +523,10 @@ async fn write_optimumless(
             ])
             .await?;
 
-        for run in &stats.runs {
+        for (run, run_no) in stats.runs.iter().zip(1..) {
             writer
                 .write_record([
+                    run_no.to_string(),
                     run.iterations.len().to_string(),
                     run.success.to_string(),
                     run.min_rr.0.to_string(),
@@ -591,6 +593,7 @@ async fn write_with_optimum(
             .create_writer(file);
         writer
             .write_record([
+                "run_no",
                 "iteration_count",
                 "best_fitness",
                 "avg_fitness",
@@ -622,9 +625,10 @@ async fn write_with_optimum(
             ])
             .await?;
 
-        for run in &stats.runs {
+        for (run, run_no) in stats.runs.iter().zip(1..) {
             writer
                 .write_record([
+                    run_no.to_string(),
                     run.iterations.len().to_string(),
                     run.best_fitness.to_string(),
                     run.avg_fitness.to_string(),
@@ -705,8 +709,10 @@ async fn write_run_with_optimum(
     let mut writer = csv_async::AsyncWriterBuilder::new()
         .delimiter(b';')
         .create_writer(file);
+
     writer
         .write_record([
+            "iteration_no",
             "selection_intensity",
             "growth_rate",
             "optimal_specimen_count",
@@ -719,9 +725,10 @@ async fn write_run_with_optimum(
         ])
         .await?;
 
-    for iteration in &run.iterations {
+    for (iteration, iteration_no) in run.iterations.iter().zip(1..) {
         writer
             .write_record([
+                iteration_no.to_string(),
                 iteration.selection_intensity.to_string(),
                 iteration.growth_rate.to_string(),
                 iteration.optimal_specimen_count.to_string(),
@@ -768,6 +775,7 @@ async fn write_optimumless_run(
 
     writer
         .write_record([
+            "iteration_no",
             "avg_fitness",
             "best_fitness",
             "fitness_std_dev",
@@ -776,9 +784,10 @@ async fn write_optimumless_run(
         ])
         .await?;
 
-    for iteration in &run.iterations {
+    for (iteration, iteration_no) in run.iterations.iter().zip(1..) {
         writer
             .write_record([
+                iteration_no.to_string(),
                 iteration.avg_fitness.to_string(),
                 iteration.best_fitness.to_string(),
                 iteration.fitness_std_dev.to_string(),
