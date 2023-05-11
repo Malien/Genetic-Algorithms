@@ -680,6 +680,12 @@ where
                 None
             },
         };
+        let selection_intensity = self
+            .iterations
+            .iter()
+            .map(|i| i.selection_intensity)
+            .take(self.iterations.len() - 1);
+        let selection_intensity_len = selection_intensity.len();
 
         RunStatsWithOptimum {
             best_fitness: final_population
@@ -690,9 +696,18 @@ where
             avg_fitness: avg_fitness(&final_population),
             converged,
             success,
-            min_selection_intensity: iteration_min(&self.iterations, |i| i.selection_intensity),
-            max_selection_intensity: iteration_max(&self.iterations, |i| i.selection_intensity),
-            avg_selection_intensity: avg_by(&self.iterations, |i| i.selection_intensity),
+            min_selection_intensity: selection_intensity
+                .clone()
+                .enumerate()
+                .min_by_key(|(_idx, value)| *value)
+                .expect("At least two iteration to be recorded"),
+            max_selection_intensity: selection_intensity
+                .clone()
+                .enumerate()
+                .max_by_key(|(_idx, value)| *value)
+                .expect("At least two iteration to be recorded"),
+            avg_selection_intensity: selection_intensity.sum::<N64>()
+                / selection_intensity_len as f64,
             early_growth_rate: self
                 .iterations
                 .get(1)
@@ -724,18 +739,24 @@ where
     }
 }
 
-fn iteration_min<U, T: Ord + Copy>(items: &[U], selector: impl Fn(&U) -> T) -> (usize, T) {
+fn iteration_min<'a, U: 'static, T: Ord + Copy>(
+    items: impl IntoIterator<Item = &'a U>,
+    selector: impl Fn(&'a U) -> T,
+) -> (usize, T) {
     items
-        .iter()
+        .into_iter()
         .map(selector)
         .enumerate()
         .min_by_key(|(_idx, value)| *value)
         .expect("At least one iteration to be recorded")
 }
 
-fn iteration_max<U, T: Ord + Copy>(items: &[U], selector: impl Fn(&U) -> T) -> (usize, T) {
+fn iteration_max<'a, U: 'static, T: Ord + Copy>(
+    items: impl IntoIterator<Item = &'a U>,
+    selector: impl Fn(&'a U) -> T,
+) -> (usize, T) {
     items
-        .iter()
+        .into_iter()
         .map(selector)
         .enumerate()
         .max_by_key(|(_idx, value)| *value)
